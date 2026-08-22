@@ -7,12 +7,19 @@ import (
 	"time"
 )
 
-// Field order on the wire. Metadata first, payload last: it keeps the head of
-// a block readable when the payload is large, and it means the varying part of
-// a frame (the id) sits before the part that can be shared across subscribers.
+// Field order on the wire: id first, payload last.
 //
-// The order is not observable by a client. Fields accumulate into buffers and
-// are only acted on at the blank line that ends the block.
+// The order is not observable by a client — fields accumulate into buffers and
+// are only acted on at the blank line that ends the block — but it matters a
+// great deal to this library. An event's id encodes a position that is only
+// assigned when the event is stored, so a stored frame cannot contain it. With
+// the id first, a frame can be encoded once with no id and shared by every
+// subscriber, and each subscriber's id line is simply prepended:
+//
+//	AppendIDLine(dst, cursor)  +  storedFrame  ==  AppendEvent(dst, eventWithID)
+//
+// That identity is what keeps fan-out to one encoding regardless of subscriber
+// count (RNF-1).
 
 // AppendEvent encodes ev and appends it to dst, returning the extended buffer.
 //
@@ -34,6 +41,9 @@ func AppendEvent(dst []byte, ev Event) ([]byte, error) {
 // validated. Splitting them keeps validation out of replay paths that re-emit
 // an event which was checked when it was first published.
 func appendEvent(dst []byte, ev Event) []byte {
+	if ev.ID.set {
+		dst = appendIDLine(dst, ev.ID)
+	}
 	if ev.Comment != "" {
 		dst = append(dst, ':')
 		dst = append(dst, ev.Comment...)
@@ -47,11 +57,6 @@ func appendEvent(dst []byte, ev Event) []byte {
 	if ev.Retry >= time.Millisecond {
 		dst = append(dst, "retry: "...)
 		dst = strconv.AppendInt(dst, int64(ev.Retry/time.Millisecond), 10)
-		dst = append(dst, '\n')
-	}
-	if ev.ID.set {
-		dst = append(dst, "id: "...)
-		dst = append(dst, ev.ID.val...)
 		dst = append(dst, '\n')
 	}
 	// A nil Data writes no field at all, which the client suppresses. An empty
@@ -73,6 +78,27 @@ func appendEvent(dst []byte, ev Event) []byte {
 			rest = rest[i+1:]
 		}
 	}
+	return append(dst, '\n')
+}
+
+// AppendIDLine appends just the id field.
+//
+// It exists so a frame stored without an id can be turned into a complete event
+// for one particular subscriber by prepending its position, without re-encoding
+// the body.
+func AppendIDLine(dst []byte, id ID) ([]byte, error) {
+	if !id.set {
+		return dst, nil
+	}
+	if err := checkID(id.val); err != nil {
+		return dst, err
+	}
+	return appendIDLine(dst, id), nil
+}
+
+func appendIDLine(dst []byte, id ID) []byte {
+	dst = append(dst, "id: "...)
+	dst = append(dst, id.val...)
 	return append(dst, '\n')
 }
 

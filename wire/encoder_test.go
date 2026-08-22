@@ -56,7 +56,7 @@ func TestAppendEvent(t *testing.T) {
 				ID:      wire.MustID("7"),
 				Retry:   5 * time.Second,
 			},
-			want: ": keep-alive\nevent: token\nretry: 5000\nid: 7\ndata: x\n\n",
+			want: "id: 7\n: keep-alive\nevent: token\nretry: 5000\ndata: x\n\n",
 		},
 		{
 			name: "reset id writes an empty field",
@@ -228,6 +228,42 @@ func TestNormalizeNewlines(t *testing.T) {
 		// The result must always be acceptable to the encoder.
 		if _, err := wire.AppendEvent(nil, wire.Event{Data: wire.NormalizeNewlines([]byte(tt.in))}); err != nil {
 			t.Errorf("normalized %q still rejected: %v", tt.in, err)
+		}
+	}
+}
+
+// The identity the log depends on: a frame encoded without an id, with an id
+// line prepended, is byte-for-byte what encoding with that id would produce.
+// It is what lets one encoded frame serve every subscriber (RNF-1).
+func TestIDLinePrependEqualsFullEncode(t *testing.T) {
+	cases := []wire.Event{
+		{Data: []byte("hello")},
+		{Name: "token", Data: []byte("a\nb")},
+		{Name: "update", Data: []byte(""), Retry: 5 * time.Second},
+		{Comment: " note", Name: "e", Data: []byte("x")},
+	}
+	for _, base := range cases {
+		body, err := wire.AppendEvent(nil, base)
+		if err != nil {
+			t.Fatalf("encoding body: %v", err)
+		}
+
+		id := wire.MustID("sse1.abcdef")
+		prepended, err := wire.AppendIDLine(nil, id)
+		if err != nil {
+			t.Fatalf("AppendIDLine: %v", err)
+		}
+		prepended = append(prepended, body...)
+
+		withID := base
+		withID.ID = id
+		full, err := wire.AppendEvent(nil, withID)
+		if err != nil {
+			t.Fatalf("encoding with id: %v", err)
+		}
+
+		if string(prepended) != string(full) {
+			t.Errorf("prepend != full encode\nprepend: %q\nfull:    %q", prepended, full)
 		}
 	}
 }
