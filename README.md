@@ -33,10 +33,28 @@ arquitectura, diseño e implementación por sí mismo.
 
 ## Estado
 
-Arquitectura cerrada, sin código todavía.
+Arquitectura cerrada (`06`) y fases 0 a 2 del plan (`07`) implementadas.
 
-- Especificación verificada contra la fuente normativa (WHATWG HTML §9.2) y estado
-  del arte contrastado. Las correcciones a `02` y `04` están anotadas en `06`.
-- Las diez decisiones de `05` están resueltas en `06`.
-- Nombre de la librería: **`sse`**.
-- Siguiente paso: Fase 0 de `07-plan-de-trabajo.md`.
+| Fase | Estado |
+|---|---|
+| 0 · Fundamentos | hecha — módulo sin dependencias verificado en CI, detección de fugas en toda la suite |
+| 1 · Capa de cable (`wire/`) | hecha — 32 vectores de conformidad, fuzzing, **0 asignaciones por evento** |
+| 2 · Sesión y transporte | hecha — nivel 0 completo, con ejemplo ejecutable |
+| 3 · El Log | siguiente |
+| 4-8 | pendientes |
+
+```go
+http.Handle("/chat", sse.Handler(func(ctx context.Context, s *sse.Session) error {
+    for token := range model.Stream(ctx, prompt) {
+        if err := s.Send(ctx, sse.Text(token)); err != nil {
+            return err
+        }
+    }
+    return nil
+}))
+```
+
+Sin cabeceras, sin flush, sin heartbeat, sin deadlines: `go run ./examples/00-llm-proxy`.
+
+Especificación verificada contra la fuente normativa (WHATWG HTML §9.2); las
+correcciones a `02` y `04` están anotadas en `06`.
