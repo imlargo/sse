@@ -47,6 +47,10 @@ type Session struct {
 	resumeGap *Gap
 	resumable bool
 
+	// batch is the writer's scratch space for gathering queued events into one
+	// write. Owned by the writer goroutine alone.
+	batch []byte
+
 	// checkpoint carries the cursor past events this subscriber filtered out,
 	// so the keep-alive can advance the client's position without delivering
 	// anything. Written by the follow loop, read by the writer goroutine.
@@ -330,25 +334,59 @@ func (s *Session) drain() {
 	}
 }
 
+// maxBatchBytes caps how much is gathered into one write. Large enough that a
+// burst becomes one syscall, small enough that the scratch buffer stays a
+// sensible size to keep per session.
+const maxBatchBytes = 64 << 10
+
 // flushQueue writes everything currently queued.
+//
+// Whatever is already waiting goes out in a single write and a single flush
+// rather than one of each per event (RF-A10). The cost of an event on the wire
+// is dominated by the syscall, not by the formatting, so a burst of twenty
+// events becomes one syscall instead of twenty. A stream that produces one
+// event at a time is unaffected: there is nothing to gather.
 func (s *Session) flushQueue() error {
 	for {
 		qf, ok := s.queue.pop()
 		if !ok {
 			return nil
 		}
-		n := len(*qf.buf)
-		if err := s.writeFrame(qf.buf); err != nil {
-			return err
+
+		batch := s.batch[:0]
+		batch = append(batch, *qf.buf...)
+		s.reportDelivered(qf, len(*qf.buf))
+		putBuf(qf.buf)
+
+		// Gather whatever else is already waiting. Only what is there now;
+		// nothing is ever held back hoping more will arrive, because latency
+		// matters more than syscalls on a quiet stream.
+		for len(batch) < maxBatchBytes {
+			next, ok := s.queue.pop()
+			if !ok {
+				break
+			}
+			batch = append(batch, *next.buf...)
+			s.reportDelivered(next, len(*next.buf))
+			putBuf(next.buf)
 		}
-		if !qf.published.IsZero() {
-			// Publication to delivery, which is the number that says whether
-			// subscribers are keeping up.
-			s.cfg.metrics.eventDelivered(qf.topic, n, time.Since(qf.published))
+		s.batch = batch
+
+		if err := s.writeBytes(batch); err != nil {
+			return err
 		}
 		events, bytes := s.queue.depth()
 		s.cfg.metrics.queueDepth(s.id, events, bytes)
 	}
+}
+
+func (s *Session) reportDelivered(qf queuedFrame, n int) {
+	if qf.published.IsZero() {
+		return
+	}
+	// Publication to delivery, which is the number that says whether
+	// subscribers are keeping up.
+	s.cfg.metrics.eventDelivered(qf.topic, n, time.Since(qf.published))
 }
 
 func (s *Session) stopRequested() bool {
@@ -384,12 +422,6 @@ func (s *Session) writeClosing() error {
 	}
 	*buf = out
 	return s.writeBytes(out)
-}
-
-func (s *Session) writeFrame(buf *[]byte) error {
-	err := s.writeBytes(*buf)
-	putBuf(buf)
-	return err
 }
 
 func (s *Session) writeBytes(b []byte) error {
