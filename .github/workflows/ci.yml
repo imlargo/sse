@@ -1,0 +1,73 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        go: ['1.25', '1.26']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go }}
+
+      - name: Build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      # RF-H1: using this library with the standard library must not drag in
+      # Gin, Fiber, Redis, NATS, Prometheus or OpenTelemetry. Verified, not promised.
+      - name: Core has no external dependencies (RF-H1)
+        run: make deps
+
+      # RP-5: the whole suite under the race detector.
+      # RP-4: leak detection runs inside it, via each package's TestMain.
+      - name: Test (race)
+        run: go test -race -count=1 ./...
+
+  fuzz:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+      # RP-2: arbitrary input must never panic or allocate without bound.
+      - name: Fuzz the parser
+        run: go test -run '^$' -fuzz FuzzDecoder -fuzztime 60s ./wire
+
+  bench:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+      # RNF-3: the allocation budget is asserted by a test, so a regression
+      # fails CI instead of being noticed later.
+      - name: Benchmarks
+        run: go test -run '^$' -bench . -benchmem ./...
+
+  staticcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+      - uses: dominikh/staticcheck-action@v1
+        with:
+          version: latest
+          install-go: false
