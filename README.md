@@ -15,7 +15,9 @@ arquitectura, diseño e implementación por sí mismo.
 | `02-dominio-y-restricciones.md` | Glosario, funcionamiento del protocolo SSE y restricciones inmutables que impone la especificación, los navegadores, la infraestructura y el runtime de Go. Hechos, no opiniones. |
 | `03-requerimientos.md` | Requerimientos funcionales y no funcionales numerados, con criterios de aceptación. El núcleo del encargo. |
 | `04-investigacion-previa.md` | Estado del arte: qué librerías existen en Go y en otros lenguajes, qué resuelve cada una y dónde falla. Referencias verificadas. |
-| `05-decisiones-abiertas.md` | Las bifurcaciones de diseño identificadas, con el espacio de opciones y los criterios para elegir. **Deliberadamente sin resolver.** |
+| `05-decisiones-abiertas.md` | Las bifurcaciones de diseño identificadas, con el espacio de opciones y los criterios para elegir. Planteamiento original; **resueltas en `06`.** |
+| `06-decisiones-cerradas.md` | Las diez decisiones de `05` resueltas y justificadas, más dos transversales que mandan sobre el resto. Es el ADR-0 del proyecto. |
+| `07-plan-de-trabajo.md` | Ocho fases con dependencias, tamaño relativo y puertas de salida trazadas a requerimientos. |
 
 ## Cómo usar este paquete
 
@@ -31,5 +33,10 @@ arquitectura, diseño e implementación por sí mismo.
 
 ## Estado
 
-Documentos de requisitos. No hay código escrito. No hay decisiones de arquitectura
-tomadas. El nombre de la librería está sin definir.
+Arquitectura cerrada, sin código todavía.
+
+- Especificación verificada contra la fuente normativa (WHATWG HTML §9.2) y estado
+  del arte contrastado. Las correcciones a `02` y `04` están anotadas en `06`.
+- Las diez decisiones de `05` están resueltas en `06`.
+- Nombre de la librería: **`spillway`**.
+- Siguiente paso: Fase 0 de `07-plan-de-trabajo.md`.
