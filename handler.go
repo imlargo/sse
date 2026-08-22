@@ -366,6 +366,10 @@ type openPayload struct {
 	Granted []string `json:"granted,omitempty"`
 	Denied  []Denial `json:"denied,omitempty"`
 
+	// Events is what this stream declares it emits, from the same catalog the
+	// API document is generated from, so the two cannot drift.
+	Events []string `json:"events,omitempty"`
+
 	Identity   string            `json:"identity,omitempty"`
 	Attributes map[string]string `json:"attributes,omitempty"`
 }
@@ -381,6 +385,7 @@ func (s *Session) capabilities() openPayload {
 		Denied:      s.grant.Denied,
 		Identity:    s.grant.Identity,
 		Attributes:  s.grant.Attributes,
+		Events:      s.cfg.catalog.Names(),
 	}
 	for _, f := range s.grant.Filters {
 		p.Granted = append(p.Granted, f.String())

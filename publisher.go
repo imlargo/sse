@@ -72,6 +72,10 @@ func (p *Publisher) Publish(ctx context.Context, v any, opts ...SendOption) (Off
 			ErrReservedName, o.name, p.cfg.prefix)
 	}
 
+	if err := p.cfg.catalog.check(o.name); err != nil {
+		return 0, err
+	}
+
 	payload, ok := v.(Payload)
 	if !ok {
 		payload = valuePayload{v}

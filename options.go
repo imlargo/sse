@@ -43,6 +43,7 @@ type config struct {
 	start        StartPosition
 	authorizer   Authorizer
 	metrics      *Metrics
+	catalog      *Catalog
 }
 
 // inherited returns the broker's configuration as options, so a handler built
@@ -59,6 +60,7 @@ func (c *config) inherited() []Option {
 		WithCodec(c.codec),
 		WithLogger(c.logger),
 		WithStart(c.start),
+		WithCatalog(c.catalog),
 		WithFullDuplex(c.fullDuplex),
 	}
 }
@@ -310,6 +312,19 @@ func WithAuthorizer(a Authorizer) Option {
 func WithMetrics(m *Metrics) Option {
 	return func(c *config) error {
 		c.metrics = m
+		return nil
+	}
+}
+
+// WithCatalog declares what the stream emits.
+//
+// It is enforced on publish, so a name that is not declared is an error rather
+// than something the generated document silently disagrees with. The same
+// declaration feeds the connection event, so a client is told what to expect
+// without that list being maintained twice.
+func WithCatalog(c *Catalog) Option {
+	return func(cfg *config) error {
+		cfg.catalog = c
 		return nil
 	}
 }

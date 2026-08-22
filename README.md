@@ -44,8 +44,8 @@ Arquitectura cerrada (`06`) y fases 0 a 2 del plan (`07`) implementadas.
 | 4 · Broker: topics y contrapresión | hecha — filtros jerárquicos, cinco políticas, checkpoint de cursor |
 | 5 · Autorización y observabilidad | hecha — Authorizer/Grant, denegación declarada, métricas sin dependencias |
 | 6 · Distribución | hecha — Redis Streams, reanudación entre nodos verificada |
-| 7 · Catálogo y OpenAPI 3.2 | siguiente |
-| 8 · Adaptadores, docs y congelación | pendiente |
+| 7 · Catálogo y OpenAPI 3.2 | hecha — sin tipos TS (descartado por el autor) |
+| 8 · Adaptadores, docs y congelación | parcial, ver abajo |
 
 ```go
 http.Handle("/chat", sse.Handler(func(ctx context.Context, s *sse.Session) error {
@@ -112,6 +112,22 @@ Verificado con dos procesos: el cliente se corta en el nodo A en el seq 9,
 reconecta contra el **nodo B**, que nunca lo había visto, y continúa en el seq 10
 sin huecos. Sin sesiones pegajosas: el cursor nombra un log y un offset, no un
 nodo. `go run ./examples/04-distributed`.
+
+Declarando lo que emite el stream, una vez, y derivando de ahí el evento de
+capacidades y el documento de API:
+
+```go
+var TicketCreated = sse.Declare[Ticket]("ticket.created").OnTopic("tenant.*.tickets")
+
+b := sse.NewBroker("events", log, sse.WithCatalog(sse.NewCatalog(TicketCreated)))
+TicketCreated.Publish(ctx, b, topic, ticket)   // no compila con otro tipo
+```
+
+`openapi.Generate` produce OpenAPI **3.2** con `itemSchema` y un `oneOf`
+discriminado por `event: {const: …}` — el patrón que la propia especificación
+publica para un stream con varios tipos de evento. Incluye los eventos
+reservados de la librería, porque un cliente que no sabe qué es `sse.gap` lo
+ignora justo cuando más lo necesita.
 
 ### Medido
 

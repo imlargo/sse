@@ -56,6 +56,13 @@ var (
 	// the client sees a normal close and reconnects with fresh credentials.
 	errDeadlineReached = errors.New("sse: grant deadline reached")
 
+	// ErrUndeclaredEvent means an event name is not in the configured catalog.
+	//
+	// Declaring a catalog is opt-in; once declared, it is enforced, so the
+	// document generated from it cannot quietly disagree with what the server
+	// actually emits.
+	ErrUndeclaredEvent = errors.New("sse: event is not declared in the catalog")
+
 	// ErrShuttingDown means the server is draining and stopped accepting new
 	// events on this session.
 	ErrShuttingDown = errors.New("sse: server is shutting down")
