@@ -74,6 +74,11 @@ type Frame struct {
 	// id field. It must be treated as immutable once appended.
 	Body []byte
 
+	// Topic is the address the event was published to. Subscribers select on
+	// it. Empty means the event is not addressed, which is the single-log case
+	// with no topics at all.
+	Topic string
+
 	// Name is the event type, kept for observability and for retention
 	// policies that distinguish event kinds.
 	Name string
@@ -93,7 +98,7 @@ type Frame struct {
 }
 
 // Size reports the frame's contribution to a log's byte budget.
-func (f Frame) Size() int { return len(f.Body) + len(f.Name) + len(f.Key) }
+func (f Frame) Size() int { return len(f.Body) + len(f.Topic) + len(f.Name) + len(f.Key) }
 
 // LogInfo describes a log's current state.
 type LogInfo struct {
@@ -155,6 +160,12 @@ const (
 
 	// GapUnresolvable means the cursor could not be decoded at all.
 	GapUnresolvable GapReason = "unresolvable"
+
+	// GapSlowConsumer means the subscriber could not keep up and its
+	// backpressure policy discarded events. They are gone for this connection;
+	// the client is told the range so it can reload state rather than assume
+	// the stream was continuous.
+	GapSlowConsumer GapReason = "slow-consumer"
 
 	// GapUnsupported means this stream does not retain history, so nothing
 	// could be replayed.

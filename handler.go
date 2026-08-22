@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"runtime/debug"
+	"time"
 )
 
 // A StreamFunc produces events for one client.
@@ -79,7 +81,48 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		_ = http.NewResponseController(w).EnableFullDuplex()
 	}
 
-	_ = serve(r.Context(), t, r, h.fn, h.cfg)
+	_ = serveHTTP(r.Context(), t, w, r, h.fn, h.cfg)
+}
+
+// serveHTTP runs the authorizer, which can still refuse with a status, and then
+// opens the stream.
+func serveHTTP(ctx context.Context, t Transport, w http.ResponseWriter, r *http.Request,
+	fn StreamFunc, cfg *config) error {
+
+	grant, err := authorizeRequest(r, cfg)
+	if err != nil {
+		code, message := statusOf(err)
+		if code >= 500 {
+			cfg.logger.ErrorContext(ctx, "sse: authorizer failed", "error", err)
+		}
+		// Sent while there is still a status to send. After the stream opens
+		// there is none, and a non-200 would stop the client reconnecting for
+		// good.
+		http.Error(w, message, code)
+		return err
+	}
+	return serve(ctx, t, r, fn, cfg, grant)
+}
+
+// authorizeRequest applies the configured authorizer, containing a panic in it
+// the same way a panic in a stream function is contained (RF-E5).
+func authorizeRequest(r *http.Request, cfg *config) (grant Grant, err error) {
+	if cfg.authorizer == nil {
+		return Grant{}, nil
+	}
+	defer func() {
+		if rec := recover(); rec != nil {
+			err = &PanicError{Value: rec, Stack: debug.Stack()}
+		}
+	}()
+	grant, err = cfg.authorizer(r)
+	if err != nil {
+		return Grant{}, err
+	}
+	if err := grant.validate(); err != nil {
+		return Grant{}, err
+	}
+	return grant, nil
 }
 
 // Serve runs fn as a stream over an arbitrary transport.
@@ -94,6 +137,18 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // request context, as on fasthttp: nothing here depends on ctx being cancelled,
 // so an adapter that cannot report disconnection still cannot leak a session.
 func Serve(ctx context.Context, t Transport, r *http.Request, fn StreamFunc, opts ...Option) error {
+	return serveWithGrant(ctx, t, r, fn, Grant{}, opts...)
+}
+
+// ServeGrant is [Serve] for an adapter that has already run its own
+// authorization and holds the result.
+func ServeGrant(ctx context.Context, t Transport, r *http.Request, fn StreamFunc,
+	grant Grant, opts ...Option) error {
+	return serveWithGrant(ctx, t, r, fn, grant, opts...)
+}
+
+func serveWithGrant(ctx context.Context, t Transport, r *http.Request, fn StreamFunc,
+	grant Grant, opts ...Option) error {
 	if fn == nil {
 		return fmt.Errorf("sse: Serve: stream function must not be nil")
 	}
@@ -104,17 +159,33 @@ func Serve(ctx context.Context, t Transport, r *http.Request, fn StreamFunc, opt
 	if err != nil {
 		return err
 	}
-	return serve(ctx, t, r, fn, cfg)
+	if cfg.authorizer != nil {
+		g, err := authorizeRequest(r, cfg)
+		if err != nil {
+			return err
+		}
+		grant = g
+	}
+	return serve(ctx, t, r, fn, cfg, grant)
 }
 
-func serve(ctx context.Context, t Transport, r *http.Request, fn StreamFunc, cfg *config) error {
+func serve(ctx context.Context, t Transport, r *http.Request, fn StreamFunc, cfg *config,
+	grant Grant) error {
+
+	bp := cfg.backpressure
+	if grant.Backpressure != nil {
+		// RF-D1: the policy is decidable per subscription, not only per server.
+		bp = *grant.Backpressure
+	}
+
 	s := &Session{
+		grant:      grant,
 		id:         newSessionID(),
 		req:        r,
 		cfg:        cfg,
 		caps:       t.Capabilities(),
 		t:          t,
-		frames:     make(chan *[]byte, cfg.sendQueue),
+		queue:      newSendQueue(bp),
 		sendClosed: make(chan struct{}),
 		stop:       make(chan struct{}),
 		done:       make(chan struct{}),
@@ -127,6 +198,13 @@ func serve(ctx context.Context, t Transport, r *http.Request, fn StreamFunc, cfg
 	// of everything else.
 	s.resolveResumption(ctx, r)
 
+	// The stream function runs under a context that ends when the session
+	// does, so a graceful drain or an expiring credential unblocks it rather
+	// than leaving it waiting on a log that will never produce anything.
+	streamCtx, cancelStream := context.WithCancel(ctx)
+	defer cancelStream()
+	s.cancelStream = cancelStream
+
 	// A node that is already draining must still answer 200.
 	//
 	// This looks wasteful and is not. A client that receives any non-200
@@ -137,7 +215,8 @@ func serve(ctx context.Context, t Transport, r *http.Request, fn StreamFunc, cfg
 	draining := false
 	if cfg.lifecycle != nil {
 		if cfg.lifecycle.add(s) {
-			defer cfg.lifecycle.remove(s)
+			// Removed explicitly at the end so the active count is reported
+			// after the change rather than after the metrics call.
 		} else {
 			draining = true
 		}
@@ -148,6 +227,28 @@ func serve(ctx context.Context, t Transport, r *http.Request, fn StreamFunc, cfg
 
 	go s.pump()
 
+	// RF-F3: a credential that expires mid-stream ends the session, and the
+	// client reconnects by itself with a fresh one and resumes from its
+	// cursor. The protocol's own reconnection turns expiry into a non-event.
+	if !grant.Deadline.IsZero() {
+		timer := time.AfterFunc(time.Until(grant.Deadline), func() {
+			s.fail(errDeadlineReached)
+			s.requestStop()
+		})
+		defer timer.Stop()
+	}
+
+	stats := SessionStats{
+		SessionID: s.id,
+		Identity:  grant.Identity,
+		Resumable: s.resumable,
+		Filters:   len(grant.Filters),
+	}
+	cfg.metrics.sessionOpened(stats)
+	if cfg.lifecycle != nil {
+		cfg.metrics.nodeSessionsActive(cfg.lifecycle.NodeSessionCount())
+	}
+
 	err := s.writeOpen()
 	switch {
 	case err != nil:
@@ -156,7 +257,7 @@ func serve(ctx context.Context, t Transport, r *http.Request, fn StreamFunc, cfg
 		s.requestStop()
 		err = ErrShuttingDown
 	default:
-		err = runGuarded(ctx, s, fn)
+		err = runGuarded(streamCtx, s, fn)
 	}
 
 	// No more events. Whatever is queued is still written before the writer exits.
@@ -166,6 +267,14 @@ func serve(ctx context.Context, t Transport, r *http.Request, fn StreamFunc, cfg
 	if err == nil {
 		err = s.Err()
 	}
+
+	stats.Reason = reasonFor(err)
+	cfg.metrics.sessionClosed(stats, err)
+	if cfg.lifecycle != nil {
+		cfg.lifecycle.remove(s)
+		cfg.metrics.nodeSessionsActive(cfg.lifecycle.NodeSessionCount())
+	}
+
 	logEnd(ctx, cfg, s, err)
 	return err
 }
@@ -249,6 +358,16 @@ type openPayload struct {
 
 	KeepAliveMs int64 `json:"keepAliveMs"`
 	RetryMs     int64 `json:"retryMs"`
+
+	// Granted and Denied say exactly what the subscription covers. RF-F2
+	// forbids the alternative: a denied topic that simply never produces
+	// events is indistinguishable from one that is merely quiet, and the
+	// client waits forever for something that will never come.
+	Granted []string `json:"granted,omitempty"`
+	Denied  []Denial `json:"denied,omitempty"`
+
+	Identity   string            `json:"identity,omitempty"`
+	Attributes map[string]string `json:"attributes,omitempty"`
 }
 
 func (s *Session) capabilities() openPayload {
@@ -259,6 +378,12 @@ func (s *Session) capabilities() openPayload {
 		Recovery:    "none",
 		KeepAliveMs: s.cfg.keepAlive.Milliseconds(),
 		RetryMs:     s.cfg.retry.Milliseconds(),
+		Denied:      s.grant.Denied,
+		Identity:    s.grant.Identity,
+		Attributes:  s.grant.Attributes,
+	}
+	for _, f := range s.grant.Filters {
+		p.Granted = append(p.Granted, f.String())
 	}
 	if s.resumable {
 		// With retention the promise is at-least-once *within the window*, and

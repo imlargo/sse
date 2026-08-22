@@ -100,13 +100,23 @@ func (p *Publisher) Publish(ctx context.Context, v any, opts ...SendOption) (Off
 			ErrEventTooLarge, len(encoded), p.cfg.maxEventSize)
 	}
 
+	p.cfg.metrics.eventPublished(o.topic.String(), len(encoded))
+
 	return p.log.Append(ctx, Frame{
 		Body:      encoded,
+		Topic:     o.topic.String(),
 		Name:      o.name,
 		Key:       o.key,
 		Ephemeral: o.ephemeral,
 	})
 }
+
+// WithTopic addresses an event to a topic, which is what subscribers select on.
+//
+// Publishing always names one concrete topic; wildcards belong to filters. That
+// way which subscribers an event reaches is a property of who is listening and
+// never of how it was addressed.
+func WithTopic(t Topic) SendOption { return func(o *sendOpts) { o.topic = t } }
 
 // Key groups events that supersede one another, for the coalescing
 // backpressure policy: a newer event with the same key replaces an older one

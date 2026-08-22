@@ -1,6 +1,6 @@
 GO ?= go
 
-.PHONY: all test race bench fuzz deps vet lint cover clean
+.PHONY: all test race bench fuzz deps redis vet lint cover clean
 
 all: vet test deps
 
@@ -19,6 +19,10 @@ bench:
 ## fuzz: short fuzzing pass over the parser (RP-2)
 fuzz:
 	$(GO) test -run '^$$' -fuzz FuzzDecoder -fuzztime 30s ./wire
+
+## redis: integration tests for the distribution seam (needs a Redis)
+redis:
+	cd logs/redis && $(GO) test -race -count=1 ./...
 
 ## deps: RF-H1 — the root module must depend on the standard library only
 deps:

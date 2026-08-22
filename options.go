@@ -16,7 +16,6 @@ const (
 	DefaultRetry        = 3 * time.Second
 	DefaultRetryJitter  = 0.5
 	DefaultMaxEventSize = 1 << 20 // 1 MiB
-	DefaultSendQueue    = 64
 	DefaultPrefix       = "sse."
 )
 
@@ -32,7 +31,7 @@ type config struct {
 	retry        time.Duration
 	retryJitter  float64
 	maxEventSize int
-	sendQueue    int
+	backpressure Backpressure
 	padding      int
 	prefix       string
 	codec        Codec
@@ -42,6 +41,26 @@ type config struct {
 	log          Log
 	logID        LogID
 	start        StartPosition
+	authorizer   Authorizer
+	metrics      *Metrics
+}
+
+// inherited returns the broker's configuration as options, so a handler built
+// from it starts from the same settings.
+func (c *config) inherited() []Option {
+	return []Option{
+		WithKeepAlive(c.keepAlive),
+		WithWriteTimeout(c.writeTimeout),
+		WithRetry(c.retry),
+		WithRetryJitter(c.retryJitter),
+		WithMaxEventSize(c.maxEventSize),
+		WithBackpressure(c.backpressure),
+		WithReservedPrefix(c.prefix),
+		WithCodec(c.codec),
+		WithLogger(c.logger),
+		WithStart(c.start),
+		WithFullDuplex(c.fullDuplex),
+	}
 }
 
 // A StartPosition says where a client with no resolvable cursor begins.
@@ -69,7 +88,6 @@ func newConfig(opts []Option) (*config, error) {
 		retry:        DefaultRetry,
 		retryJitter:  DefaultRetryJitter,
 		maxEventSize: DefaultMaxEventSize,
-		sendQueue:    DefaultSendQueue,
 		prefix:       DefaultPrefix,
 		codec:        JSONCodec{},
 		logger:       slog.Default(),
@@ -155,14 +173,24 @@ func WithMaxEventSize(n int) Option {
 	}
 }
 
-// WithSendQueue sets how many events may be queued between the producer and the
-// writer of a session.
-func WithSendQueue(n int) Option {
+// WithBackpressure sets what a slow subscriber costs and what happens when it
+// exceeds it.
+//
+// The default is [DropOldest] within a bounded queue: it degrades predictably,
+// it can never stall the publisher or another subscriber, and the client is
+// told exactly what it missed. Requiring an explicit choice here would put a
+// decision in the way of the simple case, which the priorities do not allow.
+func WithBackpressure(b Backpressure) Option {
 	return func(c *config) error {
-		if n < 0 {
-			return fmt.Errorf("sse: WithSendQueue: %d is negative", n)
+		switch b.Policy {
+		case DropOldest, DropNewest, Coalesce, Block, Disconnect:
+		default:
+			return fmt.Errorf("sse: WithBackpressure: unknown policy %d", int(b.Policy))
 		}
-		c.sendQueue = n
+		if b.MaxEvents < 0 || b.MaxBytes < 0 || b.BlockTimeout < 0 {
+			return fmt.Errorf("sse: WithBackpressure: limits must not be negative")
+		}
+		c.backpressure = b
 		return nil
 	}
 }
@@ -254,6 +282,34 @@ func WithLog(name string, log Log) Option {
 		}
 		c.log = log
 		c.logID = NewLogID(name)
+		return nil
+	}
+}
+
+// WithAuthorizer sets the decision point that runs before the stream opens.
+//
+// It is where the application sees the whole request and decides whether to
+// accept it, who it is, what it may subscribe to and under what policy. A
+// rejection is an ordinary HTTP response with a status code, sent while there
+// is still a status to send (RF-F1).
+func WithAuthorizer(a Authorizer) Option {
+	return func(c *config) error {
+		if a == nil {
+			return fmt.Errorf("sse: WithAuthorizer: authorizer must not be nil")
+		}
+		c.authorizer = a
+		return nil
+	}
+}
+
+// WithMetrics installs observation hooks.
+//
+// Metrics go through a plain struct of optional functions rather than an
+// interface, so the core imposes no dependency: Prometheus and OpenTelemetry
+// integrations live in their own modules (RNF-9). Unset hooks cost nothing.
+func WithMetrics(m *Metrics) Option {
+	return func(c *config) error {
+		c.metrics = m
 		return nil
 	}
 }

@@ -41,8 +41,11 @@ Arquitectura cerrada (`06`) y fases 0 a 2 del plan (`07`) implementadas.
 | 1 · Capa de cable (`wire/`) | hecha — 32 vectores de conformidad, fuzzing, **0 asignaciones por evento** |
 | 2 · Sesión y transporte | hecha — nivel 0 completo, con ejemplo ejecutable |
 | 3 · El Log | hecha — offsets, epoch, retención, cursor, huecos declarados |
-| 4 · Broker: topics y contrapresión | siguiente |
-| 5-8 | pendientes |
+| 4 · Broker: topics y contrapresión | hecha — filtros jerárquicos, cinco políticas, checkpoint de cursor |
+| 5 · Autorización y observabilidad | hecha — Authorizer/Grant, denegación declarada, métricas sin dependencias |
+| 6 · Distribución | hecha — Redis Streams, reanudación entre nodos verificada |
+| 7 · Catálogo y OpenAPI 3.2 | siguiente |
+| 8 · Adaptadores, docs y congelación | pendiente |
 
 ```go
 http.Handle("/chat", sse.Handler(func(ctx context.Context, s *sse.Session) error {
@@ -68,8 +71,56 @@ http.Handle("/job", sse.Handler(sse.Follow, sse.WithLog("job", log)))
 `go run ./examples/01-resumable-job`. Verificado sobre socket real: cliente cortado
 en el paso 4, reconexión con un cursor de 27 caracteres, primer evento el paso 5.
 
-Medido: **0 asignaciones** por evento codificado, y el coste de difusión es
-**idéntico con 1 y con 1000 suscriptores** (1 alloc/op en ambos).
+Con topics, para multi-tenant — publicar nombra un topic concreto, suscribirse usa
+filtros:
+
+```go
+b := sse.NewBroker("events", log)
+http.Handle("/events", b.Handler())          // ?topic=tenant.acme.>
+b.Publish(ctx, sse.MustTopic("tenant.acme.tickets"), ticket)
+```
+
+Con autorización — el `Authorizer` ve la petición entera antes de comprometer
+un solo byte, y lo que devuelve *es* la suscripción:
+
+```go
+func authorize(r *http.Request) (sse.Grant, error) {
+    user, ok := session(r)                       // cookie o query: EventSource no manda cabeceras
+    if !ok {
+        return sse.Grant{}, sse.Unauthorized("sign in to subscribe")
+    }
+    return sse.Grant{
+        Identity: user.ID,
+        Filters:  []sse.Filter{sse.MustFilter("tenant." + user.Tenant + ".>")},
+        Denied:   refused,                       // se le dice, no se le oculta
+        Deadline: user.TokenExpiry,              // caduca -> reconecta con credenciales frescas
+    }, nil
+}
+```
+
+`go run ./examples/02-multi-tenant` y `go run ./examples/03-dashboard`.
+
+En varios nodos — **la única línea que cambia en toda la aplicación**:
+
+```go
+// log0 := sse.NewMemoryLog(retention)
+log0, err := redislog.New(ctx, rdb, "sse:events", retention)
+```
+
+Ni el authorizer, ni los topics, ni el handler, ni la política de contrapresión.
+Verificado con dos procesos: el cliente se corta en el nodo A en el seq 9,
+reconecta contra el **nodo B**, que nunca lo había visto, y continúa en el seq 10
+sin huecos. Sin sesiones pegajosas: el cursor nombra un log y un offset, no un
+nodo. `go run ./examples/04-distributed`.
+
+### Medido
+
+| | |
+|---|---|
+| Codificación de evento | **0 allocs/op** |
+| Coincidencia de filtro | **0 allocs/op**, 17–33 ns |
+| Coste de difusión | **1 alloc/op con 1 suscriptor y con 1000** |
+| Cursor de un solo log | **31 bytes** |
 
 Especificación verificada contra la fuente normativa (WHATWG HTML §9.2); las
 correcciones a `02` y `04` están anotadas en `06`.

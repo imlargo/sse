@@ -48,6 +48,12 @@ func (s *Session) Resumable() bool { return s.resumable }
 // application's. There is no transition to get wrong: a reader holds a position
 // and advances it, so replay is live delivery from an older offset.
 func (s *Session) Follow(ctx context.Context) error {
+	return s.follow(ctx, nil)
+}
+
+// follow streams the log, delivering only entries the filters select. A nil
+// filter list delivers everything, which is the single-log case with no topics.
+func (s *Session) follow(ctx context.Context, filters []Filter) error {
 	if s.log == nil {
 		return fmt.Errorf("sse: Follow: no log configured; pass sse.WithLog to the handler")
 	}
@@ -104,10 +110,50 @@ func (s *Session) Follow(ctx context.Context) error {
 			}
 			return err
 		}
+
+		// Anything the backpressure policy discarded is declared before the
+		// next event, so the client never receives a stream with an
+		// unannounced hole in it (RF-D5).
+		if d, ok := s.queue.takeDrops(); ok {
+			s.cfg.metrics.eventDropped(entry.Frame.Topic, string(GapSlowConsumer), d.count)
+			if err := s.writeGap(ctx, &Gap{
+				Reason: GapSlowConsumer, From: d.from, Through: d.to,
+			}); err != nil {
+				return err
+			}
+		}
+
+		if !selects(filters, entry.Frame.Topic) {
+			// Not for this subscriber. Its position still advances, and the
+			// keep-alive carries that forward as a checkpoint so it does not
+			// resume far in the past and rescan everything it skipped.
+			s.cursor = s.cursor.With(CursorEntry{Log: s.logID, Epoch: s.epoch, Offset: entry.Offset})
+			if s.resumable {
+				cp := s.cursor.String()
+				s.checkpoint.Store(&cp)
+			}
+			continue
+		}
+
 		if err := s.writeEntry(ctx, entry); err != nil {
 			return err
 		}
 	}
+}
+
+// selects reports whether any filter matches the topic. No filters means no
+// filtering; an event with no topic is not addressed and reaches everyone.
+func selects(filters []Filter, topic string) bool {
+	if len(filters) == 0 || topic == "" {
+		return true
+	}
+	t := Topic{s: topic}
+	for _, f := range filters {
+		if f.Matches(t) {
+			return true
+		}
+	}
+	return false
 }
 
 // writeEntry sends one stored frame, prefixed with this client's position.
@@ -117,6 +163,9 @@ func (s *Session) Follow(ctx context.Context) error {
 func (s *Session) writeEntry(ctx context.Context, e Entry) error {
 	cursor := s.cursor.With(CursorEntry{Log: s.logID, Epoch: s.epoch, Offset: e.Offset})
 	s.cursor = cursor
+	// The id about to be written carries the position, so any pending
+	// checkpoint is now redundant.
+	s.checkpoint.Store(nil)
 
 	id := wire.NoID()
 	if s.resumable {
@@ -139,7 +188,10 @@ func (s *Session) writeEntry(ctx context.Context, e Entry) error {
 			ErrEventTooLarge, len(out), s.cfg.maxEventSize)
 	}
 	*buf = out
-	return s.enqueue(ctx, buf)
+	return s.enqueueFrame(ctx, queuedFrame{
+		buf: buf, key: e.Frame.Key, offset: e.Offset,
+		topic: e.Frame.Topic, published: e.Frame.Time,
+	})
 }
 
 // gapPayload is what a client receives when history could not be provided.
@@ -158,6 +210,7 @@ type gapPayload struct {
 // event, in the reserved namespace so it can never be confused with an
 // application event.
 func (s *Session) writeGap(ctx context.Context, g *Gap) error {
+	s.cfg.metrics.gapDeclared(g.Reason)
 	body, err := json.Marshal(gapPayload{
 		Reason:  g.Reason,
 		From:    g.From,
@@ -178,6 +231,8 @@ func gapDetail(r GapReason) string {
 		return "Your position belongs to an earlier generation of this stream and cannot be resolved against the current one. Reload your state."
 	case GapUnresolvable:
 		return "Your resumption token could not be decoded. Reload your state."
+	case GapSlowConsumer:
+		return "This connection could not keep up and events were discarded. Reload your state; they will not be resent on this connection."
 	case GapUnsupported:
 		return "This stream does not retain history, so nothing could be replayed. Reload your state."
 	default:

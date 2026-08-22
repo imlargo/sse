@@ -36,6 +36,9 @@ type Session struct {
 	caps Capabilities
 	t    Transport
 
+	// grant is what the authorizer decided, resolved before the stream opened.
+	grant Grant
+
 	// Resumption state, resolved once before anything is written.
 	log       Log
 	logID     LogID
@@ -44,18 +47,30 @@ type Session struct {
 	resumeGap *Gap
 	resumable bool
 
+	// checkpoint carries the cursor past events this subscriber filtered out,
+	// so the keep-alive can advance the client's position without delivering
+	// anything. Written by the follow loop, read by the writer goroutine.
+	checkpoint atomic.Pointer[string]
+
 	// following guards against mixing two sources of truth on one session:
 	// while a log is being streamed, ids come from the log, and an event sent
 	// directly would carry none and be silently unrecoverable on resume.
 	following atomic.Bool
 
-	frames chan *[]byte
+	queue *sendQueue
 
 	sendClosed    chan struct{}
 	closeSendOnce sync.Once
 
 	stop     chan struct{}
 	stopOnce sync.Once
+
+	// cancelStream unblocks the application's stream function when the session
+	// is told to stop. Stopping the writer is not enough on its own: a stream
+	// function waiting on a log would otherwise sit there until its own
+	// context ended, which for a graceful drain or an expiring credential is
+	// never.
+	cancelStream context.CancelFunc
 
 	done chan struct{} // closed when the writer goroutine has exited
 
@@ -69,6 +84,7 @@ type SendOption func(*sendOpts)
 type sendOpts struct {
 	name      string
 	key       string
+	topic     Topic
 	ephemeral bool
 }
 
@@ -178,29 +194,30 @@ func (s *Session) emit(ctx context.Context, ev wire.Event, p Payload) error {
 }
 
 func (s *Session) enqueue(ctx context.Context, buf *[]byte) error {
+	return s.enqueueFrame(ctx, queuedFrame{buf: buf})
+}
+
+func (s *Session) enqueueFrame(ctx context.Context, qf queuedFrame) error {
 	select {
 	case <-s.done:
-		putBuf(buf)
+		putBuf(qf.buf)
 		return s.endErr()
 	case <-s.sendClosed:
-		putBuf(buf)
+		putBuf(qf.buf)
 		return ErrSessionClosed
+	case <-s.stop:
+		putBuf(qf.buf)
+		return ErrShuttingDown
 	default:
 	}
-
-	select {
-	case s.frames <- buf:
-		return nil
-	case <-s.done:
-		putBuf(buf)
+	err := s.queue.push(ctx, qf, s.done)
+	if errors.Is(err, ErrSessionClosed) {
+		// The queue closes when the writer exits. If the writer exited because
+		// the connection failed, that is the useful error, not the generic
+		// one: the caller wants to know the client is gone (RF-A9).
 		return s.endErr()
-	case <-s.stop:
-		putBuf(buf)
-		return ErrShuttingDown
-	case <-ctx.Done():
-		putBuf(buf)
-		return ctx.Err()
 	}
+	return err
 }
 
 func (s *Session) endErr() error {
@@ -227,12 +244,18 @@ func (s *Session) closeSend() {
 // requestStop asks the session to drain and finish, which is what a graceful
 // shutdown does to every live session.
 func (s *Session) requestStop() {
-	s.stopOnce.Do(func() { close(s.stop) })
+	s.stopOnce.Do(func() {
+		close(s.stop)
+		if s.cancelStream != nil {
+			s.cancelStream()
+		}
+	})
 }
 
 // pump owns the transport. It is the only goroutine that writes to it.
 func (s *Session) pump() {
 	defer close(s.done)
+	defer s.queue.close()
 
 	var timer *time.Timer
 	var tick <-chan time.Time
@@ -250,8 +273,8 @@ func (s *Session) pump() {
 
 	for {
 		select {
-		case buf := <-s.frames:
-			if err := s.writeFrame(buf); err != nil {
+		case <-s.queue.signal:
+			if err := s.flushQueue(); err != nil {
 				s.fail(err)
 				return
 			}
@@ -261,7 +284,14 @@ func (s *Session) pump() {
 			// The heartbeat is also the liveness probe. A peer that has gone
 			// away is discovered here, in every environment, whether or not the
 			// request context ever fires.
-			if err := s.writeBytes(keepAliveLine); err != nil {
+			//
+			// It doubles as a cursor checkpoint. The specification commits an
+			// id to the client before deciding whether the block carries data,
+			// so an id with no data advances the client's resumption position
+			// without dispatching an event. That is what stops a subscriber
+			// whose filter matches nothing from resuming far in the past and
+			// rescanning everything it already skipped.
+			if err := s.writeKeepAlive(); err != nil {
 				s.fail(err)
 				return
 			}
@@ -286,21 +316,35 @@ func (s *Session) pump() {
 // finishing and being shut down has both channels ready at once, and the select
 // picks between them at random.
 func (s *Session) drain() {
-	for {
-		select {
-		case buf := <-s.frames:
-			if err := s.writeFrame(buf); err != nil {
-				s.fail(err)
-				return
-			}
-		default:
-			if s.stopRequested() {
-				if err := s.writeClosing(); err != nil {
-					s.fail(err)
-				}
-			}
-			return
+	if err := s.flushQueue(); err != nil {
+		s.fail(err)
+		return
+	}
+	if s.stopRequested() {
+		if err := s.writeClosing(); err != nil {
+			s.fail(err)
 		}
+	}
+}
+
+// flushQueue writes everything currently queued.
+func (s *Session) flushQueue() error {
+	for {
+		qf, ok := s.queue.pop()
+		if !ok {
+			return nil
+		}
+		n := len(*qf.buf)
+		if err := s.writeFrame(qf.buf); err != nil {
+			return err
+		}
+		if !qf.published.IsZero() {
+			// Publication to delivery, which is the number that says whether
+			// subscribers are keeping up.
+			s.cfg.metrics.eventDelivered(qf.topic, n, time.Since(qf.published))
+		}
+		events, bytes := s.queue.depth()
+		s.cfg.metrics.queueDepth(s.id, events, bytes)
 	}
 }
 
@@ -379,6 +423,32 @@ func jitterDelay(base time.Duration, frac float64) time.Duration {
 		d = time.Millisecond
 	}
 	return d
+}
+
+// writeKeepAlive emits a cursor checkpoint if the position has moved past what
+// the client has been told, and a bare comment otherwise.
+func (s *Session) writeKeepAlive() error {
+	cp := s.checkpoint.Load()
+	if cp == nil {
+		return s.writeBytes(keepAliveLine)
+	}
+	s.checkpoint.Store(nil)
+
+	id, err := wire.NewID(*cp)
+	if err != nil {
+		return s.writeBytes(keepAliveLine)
+	}
+	buf := getBuf()
+	defer putBuf(buf)
+	out, err := wire.AppendIDLine((*buf)[:0], id)
+	if err != nil {
+		return err
+	}
+	// A blank line closes the block. With no data field the client suppresses
+	// the event but still commits the id.
+	out = append(out, '\n')
+	*buf = out
+	return s.writeBytes(out)
 }
 
 // keepAliveLine is the cheapest thing that can go on the wire: a bare comment.
