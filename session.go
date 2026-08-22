@@ -1,6 +1,7 @@
 package sse
 
 import (
+	"bytes"
 	"context"
 	crand "crypto/rand"
 	"encoding/base64"
@@ -10,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"runtime/debug"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -43,9 +45,34 @@ type Session struct {
 	log       Log
 	logID     LogID
 	epoch     Epoch
-	cursor    Cursor
 	resumeGap *Gap
 	resumable bool
+
+	// presented is the position the client arrived with. It never changes.
+	presented Cursor
+
+	// carried holds the positions this session does not own — logs the client
+	// has a position in that are not the one being followed. Fixed once
+	// resolved, so the live cursor is these plus one offset.
+	carried []CursorEntry
+
+	// pos is where this session has reached in its own log. It is an integer
+	// rather than a Cursor because it moves on every event, including the ones
+	// a subscriber filters out, and rebuilding and encoding a cursor for an
+	// event nobody receives is pure waste.
+	//
+	// The writer goroutine reads it to emit a checkpoint, so it is atomic.
+	pos atomic.Uint64
+
+	// checkpointDue says the position has moved past what the client has been
+	// told. The keep-alive clears it by writing an id with no data, which the
+	// specification commits to the client without dispatching an event.
+	checkpointDue atomic.Bool
+
+	// cursorScratch belongs to the follow goroutine, encodeScratch to the
+	// writer. They are separate so neither needs a lock.
+	cursorScratch []byte
+	encodeScratch []byte
 
 	// resub carries a new filter set from outside the session. EventSource
 	// cannot send anything, so changing a subscription has to arrive through a
@@ -60,13 +87,10 @@ type Session struct {
 	reader   Reader
 
 	// batch is the writer's scratch space for gathering queued events into one
-	// write. Owned by the writer goroutine alone.
-	batch []byte
-
-	// checkpoint carries the cursor past events this subscriber filtered out,
-	// so the keep-alive can advance the client's position without delivering
-	// anything. Written by the follow loop, read by the writer goroutine.
-	checkpoint atomic.Pointer[string]
+	// write, and gathered records what to report once that write succeeds.
+	// Both belong to the writer goroutine alone.
+	batch    []byte
+	gathered []delivery
 
 	// following guards against mixing two sources of truth on one session:
 	// while a log is being streamed, ids come from the log, and an event sent
@@ -321,11 +345,19 @@ func (s *Session) pump() {
 	for {
 		select {
 		case <-s.queue.signal:
-			if err := s.flushQueue(); err != nil {
+			// A signal does not always mean there is something to write: a
+			// policy that discards an arriving event signals too, so the writer
+			// can report the drop. Resetting the timer on those would let a
+			// stream that is only discarding go silent indefinitely, and the
+			// keep-alive is also the liveness probe.
+			wrote, err := s.flushQueue()
+			if err != nil {
 				s.fail(err)
 				return
 			}
-			resetKeepAlive()
+			if wrote {
+				resetKeepAlive()
+			}
 
 		case <-tick:
 			// The heartbeat is also the liveness probe. A peer that has gone
@@ -363,7 +395,7 @@ func (s *Session) pump() {
 // finishing and being shut down has both channels ready at once, and the select
 // picks between them at random.
 func (s *Session) drain() {
-	if err := s.flushQueue(); err != nil {
+	if _, err := s.flushQueue(); err != nil {
 		s.fail(err)
 		return
 	}
@@ -386,16 +418,18 @@ const maxBatchBytes = 64 << 10
 // is dominated by the syscall, not by the formatting, so a burst of twenty
 // events becomes one syscall instead of twenty. A stream that produces one
 // event at a time is unaffected: there is nothing to gather.
-func (s *Session) flushQueue() error {
+func (s *Session) flushQueue() (wrote bool, err error) {
 	for {
 		qf, ok := s.queue.pop()
 		if !ok {
-			return nil
+			return wrote, nil
 		}
 
 		batch := s.batch[:0]
+		gathered := s.gathered[:0]
+
 		batch = append(batch, *qf.buf...)
-		s.reportDelivered(qf, len(*qf.buf))
+		gathered = append(gathered, delivery{topic: qf.topic, published: qf.published, size: len(*qf.buf)})
 		putBuf(qf.buf)
 
 		// Gather whatever else is already waiting. Only what is there now;
@@ -407,26 +441,57 @@ func (s *Session) flushQueue() error {
 				break
 			}
 			batch = append(batch, *next.buf...)
-			s.reportDelivered(next, len(*next.buf))
+			gathered = append(gathered, delivery{topic: next.topic, published: next.published, size: len(*next.buf)})
 			putBuf(next.buf)
 		}
-		s.batch = batch
+		s.batch, s.gathered = batch, gathered
 
 		if err := s.writeBytes(batch); err != nil {
-			return err
+			// Nothing in this batch reached the client, so nothing in it is
+			// reported as delivered. Counting first and writing afterwards
+			// would make the delivery metric a count of attempts, which is
+			// precisely the number nobody wants.
+			return wrote, err
 		}
+		wrote = true
+
+		now := time.Now()
+		for _, d := range gathered {
+			if d.published.IsZero() {
+				continue
+			}
+			// Publication to delivery, which is the number that says whether
+			// subscribers are keeping up.
+			s.cfg.metrics.eventDelivered(d.topic, d.size, now.Sub(d.published))
+		}
+
+		s.releaseBatch()
 		events, bytes := s.queue.depth()
 		s.cfg.metrics.queueDepth(s.id, events, bytes)
 	}
 }
 
-func (s *Session) reportDelivered(qf queuedFrame, n int) {
-	if qf.published.IsZero() {
-		return
+// a delivery records what has to be reported once a batch is actually on the
+// wire, since the frames themselves go back to the pool before that.
+type delivery struct {
+	topic     string
+	published time.Time
+	size      int
+}
+
+// releaseBatch stops one large burst from pinning its scratch space for the
+// life of the connection.
+//
+// The buffers are per session, so at tens of thousands of connections a
+// megabyte each that is never handed back is the difference between a server
+// that holds and one that does not. The threshold matches the pool's.
+func (s *Session) releaseBatch() {
+	if cap(s.batch) > maxBatchBytes {
+		s.batch = nil
 	}
-	// Publication to delivery, which is the number that says whether
-	// subscribers are keeping up.
-	s.cfg.metrics.eventDelivered(qf.topic, n, time.Since(qf.published))
+	if cap(s.gathered) > 1024 {
+		s.gathered = nil
+	}
 }
 
 func (s *Session) stopRequested() bool {
@@ -469,7 +534,15 @@ func (s *Session) writeBytes(b []byte) error {
 		// Without this, a client that stops reading but never closes pins the
 		// goroutine and the connection forever. The request context does not
 		// help: the write simply blocks.
-		_ = s.t.SetWriteDeadline(time.Now().Add(s.cfg.writeTimeout))
+		if err := s.t.SetWriteDeadline(time.Now().Add(s.cfg.writeTimeout)); err != nil {
+			// The transport said it could bound writes and then could not, so
+			// this write has no bound. Ending the session is the safe answer:
+			// the alternative is a goroutine and a connection held until the
+			// process dies, which is the failure the deadline exists for.
+			s.caps.WriteDeadline = false
+			return fmt.Errorf("%w: the transport stopped accepting write deadlines: %v",
+				ErrWriteTimeout, err)
+		}
 	}
 	if _, err := s.t.Write(b); err != nil {
 		return classifyWriteError(err)
@@ -500,29 +573,47 @@ func jitterDelay(base time.Duration, frac float64) time.Duration {
 	return d
 }
 
+// appendCursor writes this session's current position into dst.
+//
+// It allocates nothing given a buffer with room, which matters because it runs
+// on every delivered event.
+func (s *Session) appendCursor(dst []byte, offset Offset) []byte {
+	mine := CursorEntry{Log: s.logID, Epoch: s.epoch, Offset: offset}
+	if len(s.carried) == 0 {
+		// The overwhelming common case: one log, so one entry, and no sorting
+		// or merging to do.
+		dst = append(dst, cursorPrefix...)
+		return appendCursorBody(dst, []CursorEntry{mine})
+	}
+	return NewCursor(append(slices.Clone(s.carried), mine)...).AppendTo(dst)
+}
+
 // writeKeepAlive emits a cursor checkpoint if the position has moved past what
 // the client has been told, and a bare comment otherwise.
+//
+// The checkpoint is built here rather than when the position moved. A
+// subscriber with a narrow filter skips far more events than it receives, and
+// encoding a cursor for each one — to overwrite it microseconds later and read
+// it once every fifteen seconds — is work for nobody.
 func (s *Session) writeKeepAlive() error {
-	cp := s.checkpoint.Load()
-	if cp == nil {
+	if !s.checkpointDue.Swap(false) {
 		return s.writeBytes(keepAliveLine)
 	}
-	s.checkpoint.Store(nil)
 
-	id, err := wire.NewID(*cp)
-	if err != nil {
+	out := append(s.encodeScratch[:0], "id: "...)
+	out = s.appendCursor(out, Offset(s.pos.Load()))
+	// The first newline ends the id line; the second is the blank line that
+	// dispatches the block. With no data field the client suppresses the event
+	// but still commits the id, which is what advances its position without
+	// delivering anything.
+	out = append(out, '\n', '\n')
+	s.encodeScratch = out
+
+	// The id occupies one line; nothing here can produce a newline, but the
+	// wire package owns that invariant so it is asserted rather than assumed.
+	if bytes.ContainsAny(out[:len(out)-1], "\r") {
 		return s.writeBytes(keepAliveLine)
 	}
-	buf := getBuf()
-	defer putBuf(buf)
-	out, err := wire.AppendIDLine((*buf)[:0], id)
-	if err != nil {
-		return err
-	}
-	// A blank line closes the block. With no data field the client suppresses
-	// the event but still commits the id.
-	out = append(out, '\n')
-	*buf = out
 	return s.writeBytes(out)
 }
 

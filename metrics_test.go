@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/imlargo/sse"
@@ -310,5 +311,96 @@ func TestDropsAreCountedByReason(t *testing.T) {
 		if len(r.gaps) == 0 {
 			t.Error("no gap was recorded for the discarded events")
 		}
+	})
+}
+
+// A delivery metric must count what reached the client, not what was attempted.
+//
+// The batch is written first and reported afterwards. Reporting first is the
+// easy mistake — the frames go back to the pool before the write — and it turns
+// "events delivered" into "events we tried to deliver", which is the number
+// nobody wants and the one that hides an outage.
+func TestFailedWritesAreNotCountedAsDelivered(t *testing.T) {
+	rec := newRecorder()
+
+	c := ssetest.NewConn()
+	defer c.Close()
+	// Fail before anything can be written, including the connection event.
+	c.Fail(errors.New("connection reset by peer"))
+
+	_ = sse.Serve(context.Background(), c,
+		httptest.NewRequest("GET", "/s", nil),
+		func(ctx context.Context, s *sse.Session) error {
+			for range 50 {
+				if err := s.Send(ctx, sse.Text("never arrives")); err != nil {
+					return err
+				}
+			}
+			return nil
+		},
+		sse.WithMetrics(rec.metrics()), sse.WithKeepAlive(0))
+
+	rec.snapshot(func(r *recorder) {
+		if r.delivered != 0 {
+			t.Errorf("%d events counted as delivered over a connection that "+
+				"accepted nothing", r.delivered)
+		}
+		if len(r.closed) != 1 || r.closed[0].Reason != sse.ReasonClientGone {
+			t.Errorf("session close was not reported as the client being gone: %+v", r.closed)
+		}
+	})
+}
+
+// The keep-alive is the liveness probe, so only traffic that actually reached
+// the client may postpone it. A policy that discards an arriving event signals
+// the writer too, and resetting the timer on those would let a stream that is
+// only discarding go silent for as long as the discarding continues.
+func TestDiscardsDoNotPostponeTheKeepAlive(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		log := sse.NewMemoryLog(sse.Retention{Events: 10_000})
+		defer log.Close()
+		b := sse.NewBroker("events", log)
+
+		c := ssetest.NewConn()
+		defer c.Close()
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			_ = sse.Serve(ctx, c, httptest.NewRequest("GET", "/events", nil),
+				func(ctx context.Context, s *sse.Session) error { return b.Subscribe(ctx, s) },
+				sse.WithLog("events", log),
+				sse.WithKeepAlive(10*time.Second),
+				// One event of room, dropping anything that arrives on top.
+				sse.WithBackpressure(sse.Backpressure{Policy: sse.DropNewest, MaxEvents: 1}),
+			)
+		}()
+
+		synctest.Wait()
+		c.Stall() // the writer can no longer make progress
+
+		// Publish steadily for three keep-alive periods. Every one of these is
+		// discarded, and every discard signals the writer.
+		for range 60 {
+			if _, err := b.Publish(context.Background(), sse.MustTopic("t"), sse.Text("x")); err != nil {
+				t.Fatal(err)
+			}
+			time.Sleep(500 * time.Millisecond)
+		}
+		synctest.Wait()
+
+		// The session must have noticed it cannot write, rather than sitting
+		// there being reset by discards.
+		select {
+		case <-done:
+		default:
+			t.Error("a stream that could only discard never attempted a keep-alive, " +
+				"so a dead client would never have been detected")
+		}
+		cancel()
+		<-done
 	})
 }

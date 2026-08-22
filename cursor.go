@@ -117,21 +117,19 @@ func (c Cursor) Lookup(id LogID) (CursorEntry, bool) {
 }
 
 // With returns a copy of the cursor with the position for one log replaced.
+//
+// Replacing an entry that is already present keeps the existing order, so the
+// result needs neither a second copy nor a re-sort. That is the case on every
+// delivered event, which is why it is worth separating from the general one.
 func (c Cursor) With(e CursorEntry) Cursor {
-	out := make([]CursorEntry, 0, len(c.entries)+1)
-	replaced := false
-	for _, existing := range c.entries {
+	for i, existing := range c.entries {
 		if existing.Log == e.Log {
-			out = append(out, e)
-			replaced = true
-			continue
+			out := slices.Clone(c.entries)
+			out[i] = e
+			return Cursor{entries: out}
 		}
-		out = append(out, existing)
 	}
-	if !replaced {
-		out = append(out, e)
-	}
-	return NewCursor(out...)
+	return NewCursor(append(slices.Clone(c.entries), e)...)
 }
 
 // String encodes the cursor as an opaque token, safe in an HTTP header and in a
@@ -145,14 +143,46 @@ func (c Cursor) String() string {
 	if c.IsZero() {
 		return ""
 	}
-	var buf []byte
-	buf = binary.AppendUvarint(buf, uint64(len(c.entries)))
-	for _, e := range c.entries {
+	return string(c.AppendTo(nil))
+}
+
+// AppendTo encodes the cursor into dst and returns the extended buffer.
+//
+// It exists because a cursor is written on every delivered event, so the
+// encoding is on the hot path. Given a buffer with enough capacity it performs
+// no allocation, which [Cursor.String] cannot promise.
+func (c Cursor) AppendTo(dst []byte) []byte {
+	if c.IsZero() {
+		return dst
+	}
+	dst = append(dst, cursorPrefix...)
+	return appendCursorBody(dst, c.entries)
+}
+
+// appendCursorBody writes the base64url payload for a set of entries.
+//
+// The varint body is built on the stack for the sizes that matter — a handful
+// of logs — so the only work left is the base64 encoding, which writes straight
+// into dst.
+func appendCursorBody(dst []byte, entries []CursorEntry) []byte {
+	var stack [16 * 3 * binary.MaxVarintLen64]byte
+	buf := stack[:0]
+	if len(entries) > 16 {
+		buf = make([]byte, 0, (len(entries)*3+1)*binary.MaxVarintLen64)
+	}
+
+	buf = binary.AppendUvarint(buf, uint64(len(entries)))
+	for _, e := range entries {
 		buf = binary.AppendUvarint(buf, uint64(e.Log))
 		buf = binary.AppendUvarint(buf, uint64(e.Epoch))
 		buf = binary.AppendUvarint(buf, uint64(e.Offset))
 	}
-	return cursorPrefix + base64.RawURLEncoding.EncodeToString(buf)
+
+	n := base64.RawURLEncoding.EncodedLen(len(buf))
+	start := len(dst)
+	dst = append(dst, make([]byte, n)...)
+	base64.RawURLEncoding.Encode(dst[start:], buf)
+	return dst
 }
 
 // Size returns the encoded length in bytes, for checking against

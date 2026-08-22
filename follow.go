@@ -23,13 +23,18 @@ import (
 func Follow(ctx context.Context, s *Session) error { return s.Follow(ctx) }
 
 // Cursor returns the position the client presented in Last-Event-ID, already
-// decoded.
+// decoded. It is what the client arrived with and does not change as the stream
+// runs; for where the stream has reached, see [Session.Position].
 //
 // Handing over a typed value rather than a header string is the point: in every
 // Go library reviewed, resolving that header is work the application is left to
 // do, and doing it by hand is where resumption quietly goes wrong. If the token
 // could not be resolved, the cursor is zero and [Session.ResumeGap] says why.
-func (s *Session) Cursor() Cursor { return s.cursor }
+func (s *Session) Cursor() Cursor { return s.presented }
+
+// Position returns how far this session has read in the log it is following,
+// or zero when it is not following one.
+func (s *Session) Position() Offset { return Offset(s.pos.Load()) }
 
 // ResumeGap reports history the client asked for and could not be given, or nil
 // if there was none. It is set before any event is delivered.
@@ -116,9 +121,10 @@ func (s *Session) follow(ctx context.Context, filters []Filter) error {
 	// resolved does not: the gap is declared and the client is then given
 	// whatever history does still exist, which is more useful than nothing and
 	// no less honest.
-	if e, ok := s.cursor.Lookup(s.logID); ok && s.resumeGap == nil {
+	if e, ok := s.presented.Lookup(s.logID); ok && s.resumeGap == nil {
 		after = e.Offset
 	}
+	s.pos.Store(uint64(after))
 
 	// The filters are a hint so the log can avoid waking this subscriber for
 	// events it would only discard. Filtering itself still happens below.
@@ -184,10 +190,12 @@ func (s *Session) follow(ctx context.Context, filters []Filter) error {
 			// Not for this subscriber. Its position still advances, and the
 			// keep-alive carries that forward as a checkpoint so it does not
 			// resume far in the past and rescan everything it skipped.
-			s.cursor = s.cursor.With(CursorEntry{Log: s.logID, Epoch: s.epoch, Offset: entry.Offset})
+			// Only the position moves. Encoding a cursor for an event this
+			// subscriber will not receive is work for nobody; the keep-alive
+			// builds one when it is actually about to be sent.
+			s.pos.Store(uint64(entry.Offset))
 			if s.resumable {
-				cp := s.cursor.String()
-				s.checkpoint.Store(&cp)
+				s.checkpointDue.Store(true)
 			}
 			continue
 		}
@@ -218,25 +226,21 @@ func selects(filters []Filter, topic string) bool {
 // The frame itself is shared with every other subscriber and is never copied or
 // re-encoded; only the id line is per-subscriber (RNF-1).
 func (s *Session) writeEntry(ctx context.Context, e Entry) error {
-	cursor := s.cursor.With(CursorEntry{Log: s.logID, Epoch: s.epoch, Offset: e.Offset})
-	s.cursor = cursor
-	// The id about to be written carries the position, so any pending
-	// checkpoint is now redundant.
-	s.checkpoint.Store(nil)
-
-	id := wire.NoID()
-	if s.resumable {
-		var err error
-		if id, err = wire.NewID(cursor.String()); err != nil {
-			return err
-		}
-	}
+	s.pos.Store(uint64(e.Offset))
+	// The id about to go out carries the position, so any pending checkpoint
+	// is now redundant.
+	s.checkpointDue.Store(false)
 
 	buf := getBuf()
-	out, err := wire.AppendIDLine((*buf)[:0], id)
-	if err != nil {
-		putBuf(buf)
-		return err
+	out := (*buf)[:0]
+	if s.resumable {
+		// Written directly rather than through wire.NewID, which would mean
+		// materialising the cursor as a string first. The bytes are produced
+		// by this package and cannot contain NUL or a newline.
+		out = append(out, "id: "...)
+		s.cursorScratch = s.appendCursor(s.cursorScratch[:0], e.Offset)
+		out = append(out, s.cursorScratch...)
+		out = append(out, '\n')
 	}
 	out = append(out, e.Frame.Body...)
 	if len(out) > s.cfg.maxEventSize {
@@ -340,11 +344,16 @@ func (s *Session) resolveResumption(ctx context.Context, r *http.Request) {
 		s.resumeGap = &Gap{Reason: GapUnresolvable}
 		return
 	}
+	// Positions for other logs are carried through whatever happens next: they
+	// are not this session's to resolve, and dropping them would lose the
+	// client's place elsewhere.
+	s.carried = carriedEntries(cursor, s.logID)
+
 	entry, ok := cursor.Lookup(s.logID)
 	if !ok {
 		// The client has a position, but not in this log. Nothing was lost
 		// here; it simply starts from now.
-		s.cursor = cursor
+		s.presented = cursor
 		return
 	}
 	if entry.Epoch != info.Epoch {
@@ -354,5 +363,22 @@ func (s *Session) resolveResumption(ctx context.Context, r *http.Request) {
 		s.resumeGap = &Gap{Reason: GapEpoch, From: entry.Offset}
 		return
 	}
-	s.cursor = cursor
+	s.presented = cursor
+}
+
+// carriedEntries returns the positions belonging to logs this session does not
+// follow.
+//
+// A client can hold a cursor spanning several logs — it may have been served by
+// an endpoint that follows a different one. Those positions are none of this
+// session's business, but dropping them would silently lose the client's place
+// elsewhere, so they are carried through unchanged.
+func carriedEntries(c Cursor, own LogID) []CursorEntry {
+	var out []CursorEntry
+	for _, e := range c.Entries() {
+		if e.Log != own {
+			out = append(out, e)
+		}
+	}
+	return out
 }

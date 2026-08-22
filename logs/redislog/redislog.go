@@ -29,8 +29,10 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"fmt"
+	"log/slog"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/imlargo/sse"
@@ -44,6 +46,28 @@ type Log struct {
 	epoch  sse.Epoch
 	policy sse.Retention
 	block  time.Duration
+	logger *slog.Logger
+
+	// trimFailures counts consecutive failures to apply the age limit, so the
+	// log complains once and then periodically rather than on every publish.
+	trimFailures atomic.Int64
+}
+
+// WithLogger sets where the log reports problems it cannot fail a call for.
+func WithLogger(l *slog.Logger) Option {
+	return func(lg *Log) { lg.logger = l }
+}
+
+// reportTrimFailure complains about a failing age limit, loudly the first time
+// and then at a rate that will not drown a log file.
+func (l *Log) reportTrimFailure(ctx context.Context, err error) {
+	n := l.trimFailures.Add(1)
+	if n != 1 && n%1000 != 0 {
+		return
+	}
+	l.logger.WarnContext(ctx,
+		"redislog: could not apply the age-based retention limit; the stream will keep growing",
+		"stream", l.key, "consecutiveFailures", n, "error", err)
 }
 
 // Option configures a Log.
@@ -60,9 +84,12 @@ func WithBlockTimeout(d time.Duration) Option {
 // The retention is applied by Redis itself on append, so it holds across every
 // node without coordination.
 func New(ctx context.Context, rdb redis.UniversalClient, key string, r sse.Retention, opts ...Option) (*Log, error) {
-	l := &Log{rdb: rdb, key: key, policy: r, block: 5 * time.Second}
+	l := &Log{rdb: rdb, key: key, policy: r, block: 5 * time.Second, logger: slog.Default()}
 	for _, opt := range opts {
 		opt(l)
+	}
+	if l.logger == nil {
+		l.logger = slog.Default()
 	}
 	epoch, err := l.loadEpoch(ctx)
 	if err != nil {
@@ -122,10 +149,20 @@ func (l *Log) Append(ctx context.Context, f sse.Frame) (sse.Offset, error) {
 		return 0, fmt.Errorf("redislog: append: %w", err)
 	}
 	if l.policy.For > 0 {
-		// Best effort: trimming by age is a separate call, and failing to trim
-		// must not fail the publish.
+		// Trimming by age is a separate call, and failing it must not fail the
+		// publish — the event is already stored and refusing now would lose it
+		// for no reason.
+		//
+		// It is reported rather than swallowed. A trim that fails every time —
+		// a permissions change, a read-only replica — means the age limit
+		// silently stops applying and the stream grows without bound, which is
+		// exactly the kind of thing nobody notices until the memory does.
 		minID := strconv.FormatInt(time.Now().Add(-l.policy.For).UnixMilli(), 10) + "-0"
-		_ = l.rdb.XTrimMinID(ctx, l.key, minID).Err()
+		if err := l.rdb.XTrimMinID(ctx, l.key, minID).Err(); err != nil {
+			l.reportTrimFailure(ctx, err)
+		} else {
+			l.trimFailures.Store(0)
+		}
 	}
 	return parseID(id)
 }
