@@ -44,7 +44,7 @@ func TestReadReplaysRetainedHistory(t *testing.T) {
 		mustAppend(t, l, strconv.Itoa(i))
 	}
 
-	r, err := l.Read(context.Background(), 0) // 0 means everything retained
+	r, err := l.Read(context.Background(), 0, sse.ReadOptions{}) // 0 means everything retained
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -76,7 +76,7 @@ func TestGapIsDeclaredBeforeReplay(t *testing.T) {
 	}
 
 	// A client that was at offset 2 has missed events that are no longer held.
-	r, err := l.Read(context.Background(), 2)
+	r, err := l.Read(context.Background(), 2, sse.ReadOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -94,7 +94,7 @@ func TestGapIsDeclaredBeforeReplay(t *testing.T) {
 	}
 
 	// A client still inside the window gets no gap.
-	r2, err := l.Read(context.Background(), 8)
+	r2, err := l.Read(context.Background(), 8, sse.ReadOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -149,7 +149,7 @@ func TestReplayToLiveHasNoSeam(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			r, err := l.Read(ctx, resumeAt)
+			r, err := l.Read(ctx, resumeAt, sse.ReadOptions{})
 			if err != nil {
 				errs <- err
 				return
@@ -193,7 +193,7 @@ func TestSubscriberCostIsAPosition(t *testing.T) {
 
 	readers := make([]sse.Reader, 500)
 	for i := range readers {
-		r, err := l.Read(context.Background(), 0)
+		r, err := l.Read(context.Background(), 0, sse.ReadOptions{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -207,7 +207,7 @@ func TestSubscriberCostIsAPosition(t *testing.T) {
 
 	// The bytes held by the log must not depend on how many readers exist.
 	allocs := testing.AllocsPerRun(50, func() {
-		r, _ := l.Read(context.Background(), 0)
+		r, _ := l.Read(context.Background(), 0, sse.ReadOptions{})
 		_ = r.Close()
 	})
 	if allocs > 4 {
@@ -221,7 +221,7 @@ func TestSlowReaderDoesNotBlockPublisher(t *testing.T) {
 	l := sse.NewMemoryLog(sse.Retention{Events: 10})
 	defer l.Close()
 
-	r, err := l.Read(context.Background(), 0)
+	r, err := l.Read(context.Background(), 0, sse.ReadOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -246,7 +246,7 @@ func TestSlowReaderDoesNotBlockPublisher(t *testing.T) {
 	}
 
 	// And the one that fell behind is told, rather than silently resuming later.
-	r2, err := l.Read(context.Background(), 1)
+	r2, err := l.Read(context.Background(), 1, sse.ReadOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -355,7 +355,7 @@ func TestEphemeralDoesNotEvictHistory(t *testing.T) {
 		time.Sleep(2 * time.Minute)
 		mustAppend(t, l, "durable-2")
 
-		r, err := l.Read(context.Background(), 0)
+		r, err := l.Read(context.Background(), 0, sse.ReadOptions{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -375,7 +375,7 @@ func TestEphemeralDoesNotEvictHistory(t *testing.T) {
 
 func TestReadersUnblockOnClose(t *testing.T) {
 	l := sse.NewMemoryLog(sse.Retention{Events: 10})
-	r, err := l.Read(context.Background(), 0)
+	r, err := l.Read(context.Background(), 0, sse.ReadOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -403,7 +403,7 @@ func TestReadersUnblockOnClose(t *testing.T) {
 func TestReaderRespectsContext(t *testing.T) {
 	l := sse.NewMemoryLog(sse.Retention{Events: 10})
 	defer l.Close()
-	r, err := l.Read(context.Background(), 0)
+	r, err := l.Read(context.Background(), 0, sse.ReadOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -441,7 +441,7 @@ func BenchmarkLogFanout(b *testing.B) {
 
 			rs := make([]sse.Reader, readers)
 			for i := range rs {
-				r, _ := l.Read(ctx, 0)
+				r, _ := l.Read(ctx, 0, sse.ReadOptions{})
 				rs[i] = r
 			}
 			defer func() {
@@ -470,6 +470,17 @@ func BenchmarkLogFanout(b *testing.B) {
 // RNF-1, asserted rather than only benchmarked: delivering one event to N
 // subscribers must not cost N encodings. Subscribers hold offsets into a single
 // shared frame, so the per-event allocation must not grow with the audience.
+//
+// # What this does not measure
+//
+// It reads every subscriber sequentially from this goroutine, so no subscriber
+// is ever actually blocked. The claim it verifies — that the cost per event does
+// not grow with the audience — is true in allocations and false in time: a
+// subscriber parked in Next has to be made runnable, and that cost is real and
+// linear in however many subscribers a publish wakes.
+//
+// Do not read a latency guarantee out of this test. BenchmarkWakeup is the one
+// that measures waking, and it is the number that decides a node's capacity.
 func TestFanoutCostIsIndependentOfSubscriberCount(t *testing.T) {
 	measure := func(readers int) float64 {
 		l := sse.NewMemoryLog(sse.Retention{Events: 1 << 16})
@@ -478,7 +489,7 @@ func TestFanoutCostIsIndependentOfSubscriberCount(t *testing.T) {
 
 		rs := make([]sse.Reader, readers)
 		for i := range rs {
-			r, err := l.Read(ctx, 0)
+			r, err := l.Read(ctx, 0, sse.ReadOptions{})
 			if err != nil {
 				t.Fatal(err)
 			}

@@ -66,7 +66,7 @@ func TestAppendAndRead(t *testing.T) {
 		}
 	}
 
-	r, err := l.Read(ctx, 0)
+	r, err := l.Read(ctx, 0, sse.ReadOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -132,7 +132,7 @@ func TestReaderFollowsTheTail(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	r, err := l.Read(ctx, 0)
+	r, err := l.Read(ctx, 0, sse.ReadOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -183,7 +183,7 @@ func TestGapAfterTrimming(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	r, err := l.Read(ctx, first)
+	r, err := l.Read(ctx, first, sse.ReadOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}

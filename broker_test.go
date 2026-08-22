@@ -336,3 +336,155 @@ func TestBadFilterIsRejectedBeforeTheStreamOpens(t *testing.T) {
 		t.Errorf("Content-Type = %q, want an event stream", ct)
 	}
 }
+
+// Delivery to a subscriber that is already connected and idle.
+//
+// This is the case every other test in this file misses: they publish first and
+// subscribe afterwards, so the reader finds its events in the initial search and
+// never actually blocks. A fault in how a blocked reader is woken is invisible
+// to all of them, and it is the fault that matters — the subscriber does not get
+// wrong data, it gets nothing at all, for as long as the connection lasts.
+func TestLiveDeliveryToAnIdleSubscriber(t *testing.T) {
+	log := sse.NewMemoryLog(sse.Retention{Events: 1000})
+	defer log.Close()
+	b := sse.NewBroker("events", log)
+
+	cases := []struct {
+		name   string
+		filter string
+		topic  string
+	}{
+		{"exact", "user.4821.inbox", "user.4821.inbox"},
+		{"tail wildcard", "user.4821.>", "user.4821.inbox"},
+		{"single wildcard", "user.*.inbox", "user.4821.inbox"},
+		{"leading wildcard", "*.4821.inbox", "user.4821.inbox"},
+		{"everything", ">", "user.4821.inbox"},
+		{"deep", "a.b.c.d.e.>", "a.b.c.d.e.f.g"},
+		{"tenant", "tenant.acme.>", "tenant.acme.project.7.builds"},
+	}
+
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			conn := ssetest.NewConn()
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+
+			connected := make(chan struct{})
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				_ = sse.Serve(ctx, conn, httptest.NewRequest("GET", "/events", nil),
+					func(ctx context.Context, s *sse.Session) error {
+						close(connected)
+						return b.Subscribe(ctx, s, sse.MustFilter(tt.filter))
+					}, sse.WithLog("events", b.Log()), sse.WithKeepAlive(0))
+			}()
+
+			<-connected
+			// Let the reader reach its blocked state, so this exercises the
+			// wake-up path rather than the initial search.
+			deadline := time.Now().Add(2 * time.Second)
+			for len(conn.Messages()) < 1 && time.Now().Before(deadline) {
+				time.Sleep(time.Millisecond)
+			}
+			time.Sleep(20 * time.Millisecond)
+
+			if _, err := b.Publish(context.Background(), sse.MustTopic(tt.topic),
+				sse.Text("live"), sse.Name("e")); err != nil {
+				t.Fatal(err)
+			}
+
+			deadline = time.Now().Add(3 * time.Second)
+			for time.Now().Before(deadline) {
+				if len(dataOf(conn, "e")) > 0 {
+					cancel()
+					<-done
+					conn.Close()
+					return
+				}
+				time.Sleep(2 * time.Millisecond)
+			}
+			cancel()
+			<-done
+			conn.Close()
+			t.Fatalf("filter %q never received an event published to %q while it was "+
+				"idle: the subscriber was not woken", tt.filter, tt.topic)
+		})
+	}
+}
+
+// Two subscribers whose topics differ must both get their own events, even when
+// their wake buckets collide by hash.
+func TestLiveDeliveryIsNotConfusedByBucketCollisions(t *testing.T) {
+	log := sse.NewMemoryLog(sse.Retention{Events: 10_000})
+	defer log.Close()
+	b := sse.NewBroker("events", log)
+
+	const n = 300
+	conns := make([]*ssetest.Conn, n)
+	var wg sync.WaitGroup
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	ready := make(chan struct{}, n)
+	for i := range n {
+		conn := ssetest.NewConn()
+		conns[i] = conn
+		filter := sse.MustFilter(fmt.Sprintf("user.%d.>", i))
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_ = sse.Serve(ctx, conn, httptest.NewRequest("GET", "/events", nil),
+				func(ctx context.Context, s *sse.Session) error {
+					ready <- struct{}{}
+					return b.Subscribe(ctx, s, filter)
+				}, sse.WithLog("events", b.Log()), sse.WithKeepAlive(0))
+		}()
+	}
+	for range n {
+		<-ready
+	}
+	time.Sleep(100 * time.Millisecond)
+
+	// One event each, addressed individually.
+	for i := range n {
+		if _, err := b.Publish(context.Background(),
+			sse.MustTopic(fmt.Sprintf("user.%d.inbox", i)),
+			sse.Text(fmt.Sprintf("for-%d", i)), sse.Name("e")); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		missing := 0
+		for _, c := range conns {
+			if len(dataOf(c, "e")) == 0 {
+				missing++
+			}
+		}
+		if missing == 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	for i, c := range conns {
+		got := dataOf(c, "e")
+		if len(got) == 0 {
+			t.Fatalf("subscriber %d was never woken for its own event", i)
+		}
+		want := fmt.Sprintf("for-%d", i)
+		for _, d := range got {
+			if d != want {
+				t.Errorf("subscriber %d received %q, want only %q", i, d, want)
+			}
+		}
+	}
+
+	cancel()
+	wg.Wait()
+	for _, c := range conns {
+		c.Close()
+	}
+}

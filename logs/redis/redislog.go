@@ -130,7 +130,11 @@ func (l *Log) Append(ctx context.Context, f sse.Frame) (sse.Offset, error) {
 	return parseID(id)
 }
 
-func (l *Log) Read(ctx context.Context, after sse.Offset) (sse.Reader, error) {
+// Read ignores the filter hint in ReadOptions. It exists to spare a scheduler
+// the cost of waking goroutines that will discard the event, and a reader here
+// is parked on a network call rather than on a Go channel, so there is nothing
+// to save.
+func (l *Log) Read(ctx context.Context, after sse.Offset, _ sse.ReadOptions) (sse.Reader, error) {
 	info, err := l.Info(ctx)
 	if err != nil {
 		return nil, err

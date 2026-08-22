@@ -84,7 +84,9 @@ func (s *Session) follow(ctx context.Context, filters []Filter) error {
 		after = e.Offset
 	}
 
-	reader, err := s.log.Read(ctx, after)
+	// The filters are a hint so the log can avoid waking this subscriber for
+	// events it would only discard. Filtering itself still happens below.
+	reader, err := s.log.Read(ctx, after, ReadOptions{Filters: filters})
 	if err != nil {
 		return err
 	}

@@ -34,10 +34,12 @@ type MemoryLog struct {
 	bytes   int
 	closed  bool
 
-	// waiters is closed and replaced on every append. A reader takes the
-	// current channel under the read lock and then waits on it, so a wake-up
-	// costs no per-reader bookkeeping and composes with context cancellation.
-	waiters chan struct{}
+	// wake carries "something was appended", split into buckets by topic
+	// prefix so a subscriber is only made runnable for events that could
+	// plausibly be for it. A reader takes its bucket's channel under the read
+	// lock and then waits on it, so a wake-up needs no per-reader bookkeeping
+	// and composes with context cancellation.
+	wake *wakeSet
 }
 
 // NewMemoryLog returns a log retaining history according to r.
@@ -55,7 +57,7 @@ func NewMemoryLog(r Retention) *MemoryLog {
 		epoch:     newEpoch(),
 		retention: r,
 		resumable: resumable,
-		waiters:   make(chan struct{}),
+		wake:      newWakeSet(),
 	}
 }
 
@@ -97,9 +99,14 @@ func (l *MemoryLog) Append(ctx context.Context, f Frame) (Offset, error) {
 	l.bytes += f.Size()
 	l.trim(f.Time)
 
-	// Wake every reader at once by closing the channel they are all waiting on.
-	close(l.waiters)
-	l.waiters = make(chan struct{})
+	// Wake only the buckets that could hold a subscriber for this topic. An
+	// unaddressed event has no prefix to narrow by and wakes everyone, which is
+	// the single-log case and already optimal.
+	if f.Topic == "" {
+		l.wake.wakeAll()
+	} else {
+		l.wake.notify(f.Topic)
+	}
 	l.mu.Unlock()
 
 	return off, nil
@@ -138,7 +145,7 @@ func (l *MemoryLog) trim(now time.Time) {
 	}
 }
 
-func (l *MemoryLog) Read(ctx context.Context, after Offset) (Reader, error) {
+func (l *MemoryLog) Read(ctx context.Context, after Offset, opts ReadOptions) (Reader, error) {
 	l.mu.RLock()
 	closed, evicted := l.closed, l.evicted
 	l.mu.RUnlock()
@@ -146,7 +153,12 @@ func (l *MemoryLog) Read(ctx context.Context, after Offset) (Reader, error) {
 		return nil, ErrLogClosed
 	}
 
-	r := &memReader{log: l, pos: after, closed: make(chan struct{})}
+	r := &memReader{
+		log:    l,
+		pos:    after,
+		shard:  wakeShardFor(opts.Filters),
+		closed: make(chan struct{}),
+	}
 
 	// A gap is decided here, before a single event is replayed, so it can be
 	// declared to the client ahead of everything else (RF-C4).
@@ -181,17 +193,19 @@ func (l *MemoryLog) Close() error {
 		return nil
 	}
 	l.closed = true
-	close(l.waiters)
-	l.waiters = make(chan struct{})
+	l.wake.wakeAll()
 	return nil
 }
 
 // memReader walks the log. It holds only a position, never a copy of any event:
 // an extra subscriber costs one integer, not a queue (RF-D4).
 type memReader struct {
-	log    *MemoryLog
-	pos    Offset
-	gap    *Gap
+	log *MemoryLog
+	pos Offset
+	gap *Gap
+	// shard is the wake bucket this reader listens on, chosen once from its
+	// filters. Filters do not change during a subscription.
+	shard  int
 	closed chan struct{}
 	once   sync.Once
 }
@@ -227,17 +241,26 @@ func (r *memReader) Next(ctx context.Context) (Entry, error) {
 			r.log.mu.RUnlock()
 			return e, nil
 		}
-		closed, wait := r.log.closed, r.log.waiters
+		closed := r.log.closed
+		// Registering interest while still holding the read lock is what orders
+		// it against a concurrent append: a publisher taking the write lock
+		// either sees this reader waiting, or has already added the entry that
+		// the search above will find on the next pass.
+		wait := r.log.wake.channel(r.shard)
 		r.log.mu.RUnlock()
 
 		if closed {
+			r.log.wake.done(r.shard)
 			return Entry{}, ErrLogClosed
 		}
 		select {
 		case <-wait:
+			r.log.wake.done(r.shard)
 		case <-ctx.Done():
+			r.log.wake.done(r.shard)
 			return Entry{}, ctx.Err()
 		case <-r.closed:
+			r.log.wake.done(r.shard)
 			return Entry{}, ErrLogClosed
 		}
 	}

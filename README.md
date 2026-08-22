@@ -144,6 +144,53 @@ correcciones a `02` y `04` están anotadas en `06`.
 
 ---
 
+## Rendimiento y capacidad de un nodo
+
+Lo que hay que saber, en orden de importancia.
+
+**Publica una vez por cambio, no una por destinatario.** Un `Publish` es una
+operación sobre el log, no por suscriptor. Si diez mil personas miran la misma
+página, es *un* publish a un topic, no diez mil.
+
+**Un `Publish` despierta a los suscriptores cuyo filtro podría coincidir, no a
+todos.** Las notificaciones se reparten en buckets por prefijo de topic, así que
+un evento para `user.4821.inbox` no pone en marcha a los otros 14.999 conectados.
+Medido a 15.000 suscriptores, con cada uno siguiendo su propio topic:
+
+| | por publicación | publicaciones/s |
+|---|---|---|
+| suscriptores sin filtro (todos reciben todo) | 3,8 ms | ~260 |
+| suscriptores con filtro propio | 0,08 – 0,17 ms | **6.000 – 13.000** |
+
+(MacBook de 8 núcleos. La segunda fila varía con la carga de la máquina; la
+primera no, porque está dominada por el número de goroutines a despertar.
+Reproducible con `go test -bench BenchmarkWakeup`.)
+
+La primera fila es el suelo irreducible de un broadcast: si todos quieren el
+evento, hay que despertar a todos. La segunda es lo que hace viable el caso de
+notificaciones por usuario, que antes costaba lo mismo que un broadcast.
+
+**Reparte en réplicas.** El coste es por nodo. Tres réplicas con 5.000
+conexiones cada una despiertan a un tercio de la gente por evento.
+
+**Memoria: ~50 KB de RSS por conexión**, de los cuales la librería aporta ~4 KB.
+El resto son las goroutines y los buffers de `net/http`. A 15.000 conexiones,
+del orden de 900 MB.
+
+**Límites del sistema.** Cada conexión es un descriptor y tres goroutines. Con
+decenas de miles conviene subirlos:
+
+```ini
+# systemd
+LimitNOFILE=65535
+LimitNPROC=16384
+```
+
+Con `>` o sin filtro, un suscriptor está en el bucket que recibe todo — correcto
+y sin optimizar, que es lo que un suscriptor a todo pide de todas formas.
+
+---
+
 ## Frameworks
 
 **Gin y Echo no necesitan adaptador.** Ambos envuelven `http.ResponseWriter` e

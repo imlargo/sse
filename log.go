@@ -34,7 +34,7 @@ type Log interface {
 	//
 	// If entries after that offset have already been evicted, the reader
 	// reports it through [Reader.Gap] rather than quietly starting later.
-	Read(ctx context.Context, after Offset) (Reader, error)
+	Read(ctx context.Context, after Offset, opts ReadOptions) (Reader, error)
 
 	// Info reports the log's generation and the range it currently holds.
 	Info(ctx context.Context) (LogInfo, error)
@@ -54,6 +54,18 @@ type Reader interface {
 
 	// Close releases the reader. It is safe to call more than once.
 	Close() error
+}
+
+// ReadOptions tells an implementation what a reader is going to keep, so it can
+// avoid waking that reader for events it would discard.
+//
+// It is strictly advisory. Filtering is applied above the log, by whoever asked
+// for the read, and an implementation is always free to ignore this entirely —
+// waking a reader too often is a performance question, while failing to wake
+// one is a bug. An implementation must never use it to withhold an entry.
+type ReadOptions struct {
+	// Filters is what the subscriber will accept. Empty means everything.
+	Filters []Filter
 }
 
 // An Entry is one stored event and its position.
