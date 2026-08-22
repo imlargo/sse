@@ -1,6 +1,6 @@
 GO ?= go
 
-.PHONY: all test race bench fuzz deps redis vet lint cover clean
+.PHONY: all test race bench fuzz deps redis compat vet lint cover clean
 
 all: vet test deps
 
@@ -23,6 +23,10 @@ fuzz:
 ## redis: integration tests for the distribution seam (needs a Redis)
 redis:
 	cd logs/redis && $(GO) test -race -count=1 ./...
+
+## compat: third-party framework compatibility (Gin, Echo)
+compat:
+	cd compat && $(GO) test -race -count=1 ./...
 
 ## deps: RF-H1 — the root module must depend on the standard library only
 deps:

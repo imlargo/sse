@@ -140,3 +140,47 @@ ignora justo cuando más lo necesita.
 
 Especificación verificada contra la fuente normativa (WHATWG HTML §9.2); las
 correcciones a `02` y `04` están anotadas en `06`.
+
+
+---
+
+## Frameworks
+
+**Gin y Echo no necesitan adaptador.** Ambos envuelven `http.ResponseWriter` e
+implementan `Unwrap() http.ResponseWriter`, así que `http.ResponseController`
+alcanza el writer real y tanto el vaciado como los deadlines de escritura
+funcionan tal cual:
+
+```go
+r.GET("/events", gin.WrapH(sse.Handler(stream)))          // Gin 1.12
+e.GET("/events", echo.WrapHandler(sse.Handler(stream)))   // Echo 4.15
+```
+
+Verificado en CI (`compat/`, módulo aparte para que sus dependencias no entren
+en el grafo del núcleo). Si algún día dejan de exponer el writer, el test falla
+y la librería rechaza el stream con un error que nombra el tipo culpable en vez
+de abrir un stream que nunca se puede vaciar.
+
+Pendiente: **Fiber**. No va sobre `net/http` y su contexto de petición no señala
+la desconexión del cliente, que es el hueco documentado del ecosistema. Necesita
+una implementación propia de `Transport`.
+
+## No-objetivos
+
+Declarados en voz alta, porque poner los límites por delante evita expectativas
+mal puestas:
+
+- **Comunicación bidireccional de baja latencia.** Juegos, edición colaborativa
+  con CRDT, voz o vídeo. Eso es WebSocket o WebRTC.
+- **Transporte de datos binarios de volumen.** El cable es texto UTF-8;
+  codificar en base64 cuesta ~33% de sobrecarga.
+- **Garantías transaccionales o colas durables por consumidor.** Con historial
+  esto ofrece entrega **al menos una vez dentro de una ventana de retención**,
+  no durabilidad. Quien necesite lo segundo necesita una cola, y SSE será solo
+  el último tramo de entrega.
+- **Miles de mensajes por segundo por conexión individual.** El agrupamiento y
+  la fusión ayudan, pero la sobrecarga del formato de texto pesa.
+- **Ser un servidor autónomo.** Para eso están Centrifugo, AnyCable o el hub de
+  Mercure. Esto es una librería para embeber.
+- **Cliente Go.** Fuera del alcance de la v1. El decodificador de `wire/` **no**
+  es un cliente: no tiene reconexión, ni backoff, ni gestión de cursor.
