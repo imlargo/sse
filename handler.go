@@ -298,15 +298,29 @@ func logEnd(ctx context.Context, cfg *config, s *Session, err error) {
 	}
 }
 
-func setStreamHeaders(h http.Header, r *http.Request) {
+// StreamHeaders returns the response headers a stream needs.
+//
+// It is exported for adapters to frameworks that must set headers before the
+// body starts, which is the case for anything built on fasthttp. Using this
+// rather than writing the same headers by hand is what keeps an adapter from
+// drifting from the core: there is one definition and adapters apply it.
+func StreamHeaders(r *http.Request) http.Header {
+	h := make(http.Header, 4)
 	h.Set("Content-Type", "text/event-stream")
 	h.Set("Cache-Control", "no-cache")
 	// Defeat nginx's response buffering, which otherwise holds the stream until
 	// its buffer fills and makes the whole thing look broken.
 	h.Set("X-Accel-Buffering", "no")
-	if r.ProtoMajor == 1 {
+	if r != nil && r.ProtoMajor == 1 {
 		// Connection is a hop-by-hop header and is forbidden under HTTP/2.
 		h.Set("Connection", "keep-alive")
+	}
+	return h
+}
+
+func setStreamHeaders(h http.Header, r *http.Request) {
+	for k, vs := range StreamHeaders(r) {
+		h[k] = vs
 	}
 }
 

@@ -21,7 +21,18 @@ import (
 // Usage, in every package under test:
 //
 //	func TestMain(m *testing.M) { leak.Main(m.Run) }
-func Main(run func() int) {
+func Main(run func() int) { MainIgnoring(run) }
+
+// MainIgnoring is [Main] with extra frames treated as not ours.
+//
+// It exists for the adapter modules, where a third-party framework starts
+// goroutines of its own that outlive its shutdown. Each entry has to name a
+// specific frame in that framework, never a broad pattern: the whole value of
+// this check is that it fails on our leaks, and an ignore list that swallows
+// them is worse than no check.
+func MainIgnoring(run func() int, extra ...string) {
+	foreign = append(foreign, extra...)
+
 	before := snapshot()
 
 	if code := run(); code != 0 {
@@ -113,7 +124,15 @@ var harnessFrames = []string{
 	"github.com/imlargo/sse/internal/leak.snapshot",
 }
 
+// foreign holds frames added by a caller through MainIgnoring.
+var foreign []string
+
 func harness(stack string) bool {
+	for _, frame := range foreign {
+		if strings.Contains(stack, frame) {
+			return true
+		}
+	}
 	for _, frame := range harnessFrames {
 		if strings.Contains(stack, frame) {
 			return true
