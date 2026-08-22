@@ -176,3 +176,81 @@ func TestQuietBucketsAreNotDisturbed(t *testing.T) {
 		t.Errorf("notifying with no waiters allocates %.0f times per publish", allocs)
 	}
 }
+
+// The invariant the whole wake-up scheme rests on, against generated input
+// rather than a table somebody thought of.
+//
+// Over-waking wastes a scheduler slot. Under-waking means a subscriber that
+// never receives anything again — silently, for the life of the connection —
+// which is the worst failure this library has. A hand-written table only covers
+// the shapes its author imagined; this covers the ones nobody did.
+func FuzzNeverUnderWakes(f *testing.F) {
+	seeds := [][2]string{
+		{"a.b.c", "a.b.c"}, {"a.>", "a.b"}, {"a.*.c", "a.b.c"}, {">", "z"},
+		{"*", "a"}, {"a.b.>", "a.b.c.d"}, {"tenant.acme.>", "tenant.acme.x"},
+		{"user.4821.>", "user.4821.inbox"},
+	}
+	for _, s := range seeds {
+		f.Add(s[0], s[1])
+	}
+
+	f.Fuzz(func(t *testing.T, filterStr, topicStr string) {
+		filter, err := NewFilter(filterStr)
+		if err != nil {
+			t.Skip()
+		}
+		topic, err := NewTopic(topicStr)
+		if err != nil {
+			t.Skip()
+		}
+		if !filter.Matches(topic) {
+			t.Skip() // over-waking is allowed; only matches must be woken
+		}
+
+		// The bucket the subscriber waits on has to be one this topic notifies.
+		bucket := wakeShardFor([]Filter{filter})
+		if !notifies(topicStr, bucket) {
+			t.Fatalf("filter %q matches topic %q but waits on bucket %d, which "+
+				"publishing to %q never notifies: this subscriber would stop "+
+				"receiving anything, permanently and silently",
+				filterStr, topicStr, bucket, topicStr)
+		}
+
+		// And the same with the filter paired with an unrelated one, since a
+		// subscriber may hold several and the bucket is their common prefix.
+		for _, other := range []string{">", "zzz.qqq", filterStr} {
+			if o, err := NewFilter(other); err == nil {
+				b2 := wakeShardFor([]Filter{filter, o})
+				if !notifies(topicStr, b2) {
+					t.Fatalf("filters %q + %q match %q but wait on bucket %d, "+
+						"which publishing to %q never notifies",
+						filterStr, other, topicStr, b2, topicStr)
+				}
+			}
+		}
+	})
+}
+
+// concretePrefix must always return a prefix that ends on a token boundary and
+// is genuinely a prefix of the filter, since the bucket is derived from it.
+func FuzzConcretePrefixIsATokenPrefix(f *testing.F) {
+	for _, s := range []string{"a", "a.b", "a.>", "a.*.b", ">", "*", "a.b.c.d"} {
+		f.Add(s)
+	}
+	f.Fuzz(func(t *testing.T, s string) {
+		filter, err := NewFilter(s)
+		if err != nil {
+			t.Skip()
+		}
+		got := concretePrefix(filter)
+		if !strings.HasPrefix(s, got) {
+			t.Fatalf("concretePrefix(%q) = %q, which is not a prefix of it", s, got)
+		}
+		if got != "" && got != s && s[len(got)] != '.' {
+			t.Fatalf("concretePrefix(%q) = %q, which stops mid-token", s, got)
+		}
+		if strings.ContainsAny(got, "*>") {
+			t.Fatalf("concretePrefix(%q) = %q, which contains a wildcard", s, got)
+		}
+	})
+}

@@ -1,6 +1,6 @@
 GO ?= go
 
-.PHONY: all test race bench fuzz soak deps redis compat fiber vet lint check release-check release-prep cover clean
+.PHONY: all test race bench fuzz stress soak deps redis compat fiber vet lint check release-check release-prep cover clean
 
 all: vet lint test deps
 
@@ -16,9 +16,16 @@ race:
 bench:
 	$(GO) test -run '^$$' -bench . -benchmem -timeout 10m ./...
 
-## fuzz: short fuzzing pass over the parser (RP-2)
+## fuzz: short pass over the parser and the silent-failure invariants (RP-2)
 fuzz:
 	$(GO) test -run '^$$' -fuzz FuzzDecoder -fuzztime 30s ./wire
+	$(GO) test -run '^$$' -fuzz FuzzNeverUnderWakes -fuzztime 20s .
+	$(GO) test -run '^$$' -fuzz FuzzTopicValidation -fuzztime 20s .
+	$(GO) test -run '^$$' -fuzz FuzzParseCursor -fuzztime 20s .
+
+## stress: concurrency under the race detector
+stress:
+	$(GO) test -race -count=1 -run TestStress -timeout 15m .
 
 ## redis: integration tests for the distribution seam (needs a Redis)
 redis:

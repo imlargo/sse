@@ -56,7 +56,7 @@ func Generate(opts Options, streams ...Stream) (Document, error) {
 	}
 
 	defs := map[string]Schema{}
-	seen := map[reflect.Type]bool{}
+	seen := map[reflect.Type]string{}
 	paths := map[string]any{}
 
 	for _, st := range streams {
@@ -96,7 +96,7 @@ func Generate(opts Options, streams ...Stream) (Document, error) {
 	return doc, nil
 }
 
-func operation(st Stream, opts Options, defs map[string]Schema, seen map[reflect.Type]bool) (map[string]any, error) {
+func operation(st Stream, opts Options, defs map[string]Schema, seen map[reflect.Type]string) (map[string]any, error) {
 	variants, err := eventVariants(st, opts, defs, seen)
 	if err != nil {
 		return nil, err
@@ -171,7 +171,7 @@ func operation(st Stream, opts Options, defs map[string]Schema, seen map[reflect
 	return op, nil
 }
 
-func eventVariants(st Stream, opts Options, defs map[string]Schema, seen map[reflect.Type]bool) ([]any, error) {
+func eventVariants(st Stream, opts Options, defs map[string]Schema, seen map[reflect.Type]string) ([]any, error) {
 	var out []any
 	add := func(name, description string, sample any) {
 		props := map[string]any{

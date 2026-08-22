@@ -674,7 +674,14 @@ func wireOpenEvent(s *Session) wire.Event {
 func isExpectedEnd(err error) bool {
 	return errors.Is(err, ErrClientGone) ||
 		errors.Is(err, ErrWriteTimeout) ||
+		errors.Is(err, ErrSlowConsumer) ||
 		errors.Is(err, ErrSessionClosed) ||
 		errors.Is(err, ErrShuttingDown) ||
-		errors.Is(err, context.Canceled)
+		// A grant expiring is the design working, not a fault: the client
+		// reconnects with fresh credentials. Logging it as an error would
+		// mean one error line per session per token lifetime, which at any
+		// scale drowns the lines that matter.
+		errors.Is(err, errDeadlineReached) ||
+		errors.Is(err, context.Canceled) ||
+		errors.Is(err, context.DeadlineExceeded)
 }

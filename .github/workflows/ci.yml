@@ -62,6 +62,27 @@ jobs:
       - name: Fuzz the parser
         run: go test -run '^$' -fuzz FuzzDecoder -fuzztime 60s ./wire
 
+      # The invariants whose failure is silent rather than loud: a subscriber
+      # that is never woken again, a cursor that resolves to a position it did
+      # not name, a topic the matcher was not built for.
+      - name: Fuzz the invariants
+        run: |
+          go test -run '^$' -fuzz FuzzNeverUnderWakes -fuzztime 45s .
+          go test -run '^$' -fuzz FuzzTopicValidation -fuzztime 30s .
+          go test -run '^$' -fuzz FuzzParseCursor -fuzztime 30s .
+
+  # Concurrency, under the race detector. Reading finds the bugs you thought of;
+  # this is for the orderings nobody did.
+  stress:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+      - name: Stress
+        run: go test -race -count=1 -run TestStress -timeout 15m .
+
   bench:
     runs-on: ubuntu-latest
     steps:

@@ -21,6 +21,7 @@ package openapi
 import (
 	"encoding/json"
 	"reflect"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -32,7 +33,7 @@ type Schema map[string]any
 //
 // Named struct types become references into components/schemas so a type used
 // by several events appears once. defs collects them.
-func schemaFor(t reflect.Type, defs map[string]Schema, seen map[reflect.Type]bool) Schema {
+func schemaFor(t reflect.Type, defs map[string]Schema, seen map[reflect.Type]string) Schema {
 	if t == nil {
 		return Schema{}
 	}
@@ -80,14 +81,15 @@ func schemaFor(t reflect.Type, defs map[string]Schema, seen map[reflect.Type]boo
 		}
 
 	case reflect.Struct:
-		name := t.Name()
-		if name == "" {
+		if t.Name() == "" {
 			return structSchema(t, defs, seen)
 		}
-		if !seen[t] {
+		name, known := seen[t]
+		if !known {
+			name = componentName(t, defs)
 			// Reserve the name before recursing, so a self-referential type
 			// terminates instead of blowing the stack.
-			seen[t] = true
+			seen[t] = name
 			defs[name] = Schema{}
 			defs[name] = structSchema(t, defs, seen)
 		}
@@ -101,7 +103,52 @@ func schemaFor(t reflect.Type, defs map[string]Schema, seen map[reflect.Type]boo
 	}
 }
 
-func structSchema(t reflect.Type, defs map[string]Schema, seen map[reflect.Type]bool) Schema {
+// componentName picks the key a type appears under in components/schemas.
+//
+// The bare type name is used while it is unambiguous, because that is what a
+// reader wants to see. Two different types that happen to share a name — from
+// different packages — must not collapse into one entry: the document would
+// then describe the wrong shape for one of them, and a generated client would
+// be wrong in a way nothing checks. So the second one is qualified by its
+// package, and a further clash is numbered.
+func componentName(t reflect.Type, defs map[string]Schema) string {
+	name := t.Name()
+	if _, taken := defs[name]; !taken {
+		return name
+	}
+
+	if pkg := t.PkgPath(); pkg != "" {
+		qualified := sanitiseComponent(pkg[strings.LastIndexByte(pkg, '/')+1:]) + "." + name
+		if _, taken := defs[qualified]; !taken {
+			return qualified
+		}
+		name = qualified
+	}
+	for i := 2; ; i++ {
+		candidate := name + "." + strconv.Itoa(i)
+		if _, taken := defs[candidate]; !taken {
+			return candidate
+		}
+	}
+}
+
+// sanitiseComponent keeps a key within what OpenAPI allows for a component
+// name: letters, digits, dot, dash and underscore.
+func sanitiseComponent(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z',
+			r >= '0' && r <= '9', r == '.', r == '-', r == '_':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('_')
+		}
+	}
+	return b.String()
+}
+
+func structSchema(t reflect.Type, defs map[string]Schema, seen map[reflect.Type]string) Schema {
 	props := map[string]any{}
 	var required []string
 

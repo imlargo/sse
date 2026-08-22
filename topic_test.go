@@ -200,3 +200,57 @@ func BenchmarkFilterMatches(b *testing.B) {
 		})
 	}
 }
+
+// Validation must never accept something the matcher then has to cope with, and
+// never panic on input that arrived in a query string.
+func FuzzTopicValidation(f *testing.F) {
+	for _, s := range []string{
+		"", "a", "a.b", "org.42.tickets", "a..b", ".a", "a.", "*", ">", "a.*.b",
+		"a.>.b", "a#b", "a b", "a/b", "a%b", "\x00", "ñ", strings.Repeat("a.", 40),
+	} {
+		f.Add(s)
+	}
+
+	f.Fuzz(func(t *testing.T, s string) {
+		topic, topicErr := sse.NewTopic(s)
+		filter, filterErr := sse.NewFilter(s)
+
+		// Anything a topic accepts a filter must accept: a filter is a topic
+		// plus wildcards, so the grammar can only widen.
+		if topicErr == nil && filterErr != nil {
+			t.Fatalf("%q is a valid topic but not a valid filter: %v", s, filterErr)
+		}
+
+		if topicErr == nil {
+			if topic.String() != s {
+				t.Fatalf("topic round-trip changed %q into %q", s, topic.String())
+			}
+			if len(s) > sse.MaxTopicLength {
+				t.Fatalf("%q is %d bytes and was accepted", s, len(s))
+			}
+			// A valid topic must match itself, and the universal filter.
+			exact, err := sse.NewFilter(s)
+			if err != nil {
+				t.Fatalf("a valid topic is not a valid exact filter: %v", err)
+			}
+			if !exact.Matches(topic) {
+				t.Fatalf("topic %q does not match itself", s)
+			}
+			if !sse.MustFilter(">").Matches(topic) {
+				t.Fatalf("the universal filter does not match %q", s)
+			}
+		}
+
+		if filterErr == nil {
+			if filter.String() != s {
+				t.Fatalf("filter round-trip changed %q into %q", s, filter.String())
+			}
+			// Matching must not panic against anything, valid or not.
+			for _, other := range []string{"a", "a.b", "a.b.c", "x.y.z", s} {
+				if ot, err := sse.NewTopic(other); err == nil {
+					_ = filter.Matches(ot)
+				}
+			}
+		}
+	})
+}

@@ -197,6 +197,14 @@ func (q *sendQueue) push(ctx context.Context, qf queuedFrame, done <-chan struct
 				putBuf(old.buf)
 				q.items[i] = qf
 				q.bytes += size
+
+				// A replacement can be larger than what it superseded, so the
+				// budget has to be rechecked. Superseding is not a way around
+				// the limit: a subscriber's memory has to stay bounded whatever
+				// the policy (RF-D4).
+				for q.bytes > q.bp.MaxBytes && len(q.items) > 1 {
+					q.dropFrontLocked()
+				}
 				q.mu.Unlock()
 				notify(q.signal)
 				return nil
