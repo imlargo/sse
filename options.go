@@ -16,7 +16,6 @@ const (
 	DefaultRetry        = 3 * time.Second
 	DefaultRetryJitter  = 0.5
 	DefaultMaxEventSize = 1 << 20 // 1 MiB
-	DefaultSendQueue    = 64
 	DefaultPrefix       = "sse."
 )
 
@@ -32,7 +31,7 @@ type config struct {
 	retry        time.Duration
 	retryJitter  float64
 	maxEventSize int
-	sendQueue    int
+	backpressure Backpressure
 	padding      int
 	prefix       string
 	codec        Codec
@@ -69,7 +68,6 @@ func newConfig(opts []Option) (*config, error) {
 		retry:        DefaultRetry,
 		retryJitter:  DefaultRetryJitter,
 		maxEventSize: DefaultMaxEventSize,
-		sendQueue:    DefaultSendQueue,
 		prefix:       DefaultPrefix,
 		codec:        JSONCodec{},
 		logger:       slog.Default(),
@@ -155,14 +153,24 @@ func WithMaxEventSize(n int) Option {
 	}
 }
 
-// WithSendQueue sets how many events may be queued between the producer and the
-// writer of a session.
-func WithSendQueue(n int) Option {
+// WithBackpressure sets what a slow subscriber costs and what happens when it
+// exceeds it.
+//
+// The default is [DropOldest] within a bounded queue: it degrades predictably,
+// it can never stall the publisher or another subscriber, and the client is
+// told exactly what it missed. Requiring an explicit choice here would put a
+// decision in the way of the simple case, which the priorities do not allow.
+func WithBackpressure(b Backpressure) Option {
 	return func(c *config) error {
-		if n < 0 {
-			return fmt.Errorf("sse: WithSendQueue: %d is negative", n)
+		switch b.Policy {
+		case DropOldest, DropNewest, Coalesce, Block, Disconnect:
+		default:
+			return fmt.Errorf("sse: WithBackpressure: unknown policy %d", int(b.Policy))
 		}
-		c.sendQueue = n
+		if b.MaxEvents < 0 || b.MaxBytes < 0 || b.BlockTimeout < 0 {
+			return fmt.Errorf("sse: WithBackpressure: limits must not be negative")
+		}
+		c.backpressure = b
 		return nil
 	}
 }

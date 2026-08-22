@@ -36,9 +36,10 @@ type Conn struct {
 	deadline time.Time
 	caps     sse.Capabilities
 
-	stalled bool
-	failed  error
-	closed  chan struct{}
+	stalled  bool
+	throttle time.Duration
+	failed   error
+	closed   chan struct{}
 }
 
 // NewConn returns a transport that can flush and honour write deadlines, which
@@ -83,11 +84,22 @@ func (c *Conn) SetWriteDeadline(t time.Time) error {
 
 func (c *Conn) Write(p []byte) (int, error) {
 	c.mu.Lock()
-	stalled, deadline, failed := c.stalled, c.deadline, c.failed
+	stalled, deadline, failed, throttle := c.stalled, c.deadline, c.failed, c.throttle
 	c.mu.Unlock()
 
 	if failed != nil {
 		return 0, failed
+	}
+
+	// A client that reads, but slowly. This is the interesting case for
+	// backpressure: a fully dead connection never observes what a policy did,
+	// because nothing can be written to tell it.
+	if throttle > 0 && !stalled {
+		select {
+		case <-time.After(throttle):
+		case <-c.closed:
+			return 0, io.ErrClosedPipe
+		}
 	}
 
 	if stalled {
@@ -123,6 +135,14 @@ func (c *Conn) Flush() error {
 	}
 	c.mu.Unlock()
 	return failed
+}
+
+// Throttle makes every write take d, simulating a client that reads but cannot
+// keep up.
+func (c *Conn) Throttle(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.throttle = d
 }
 
 // Stall makes every subsequent write hang, simulating a client that stopped

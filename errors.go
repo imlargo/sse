@@ -44,6 +44,14 @@ var (
 	// library will not do. Publish it to the log instead.
 	ErrFollowing = errors.New("sse: cannot Send while following a log; publish to the log instead")
 
+	// ErrSlowConsumer means a subscription fell behind beyond what its
+	// backpressure policy allows.
+	//
+	// It is only an acceptable outcome when history is retained: otherwise the
+	// client silently loses whatever it missed, so the library says so at
+	// startup rather than leaving it to be discovered (RF-D6).
+	ErrSlowConsumer = errors.New("sse: consumer is too slow")
+
 	// ErrShuttingDown means the server is draining and stopped accepting new
 	// events on this session.
 	ErrShuttingDown = errors.New("sse: server is shutting down")

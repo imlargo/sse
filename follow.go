@@ -104,6 +104,18 @@ func (s *Session) Follow(ctx context.Context) error {
 			}
 			return err
 		}
+
+		// Anything the backpressure policy discarded is declared before the
+		// next event, so the client never receives a stream with an
+		// unannounced hole in it (RF-D5).
+		if d, ok := s.queue.takeDrops(); ok {
+			if err := s.writeGap(ctx, &Gap{
+				Reason: GapSlowConsumer, From: d.from, Through: d.to,
+			}); err != nil {
+				return err
+			}
+		}
+
 		if err := s.writeEntry(ctx, entry); err != nil {
 			return err
 		}
@@ -139,7 +151,7 @@ func (s *Session) writeEntry(ctx context.Context, e Entry) error {
 			ErrEventTooLarge, len(out), s.cfg.maxEventSize)
 	}
 	*buf = out
-	return s.enqueue(ctx, buf)
+	return s.enqueueFrame(ctx, queuedFrame{buf: buf, key: e.Frame.Key, offset: e.Offset})
 }
 
 // gapPayload is what a client receives when history could not be provided.
@@ -178,6 +190,8 @@ func gapDetail(r GapReason) string {
 		return "Your position belongs to an earlier generation of this stream and cannot be resolved against the current one. Reload your state."
 	case GapUnresolvable:
 		return "Your resumption token could not be decoded. Reload your state."
+	case GapSlowConsumer:
+		return "This connection could not keep up and events were discarded. Reload your state; they will not be resent on this connection."
 	case GapUnsupported:
 		return "This stream does not retain history, so nothing could be replayed. Reload your state."
 	default:

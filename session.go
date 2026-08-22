@@ -49,7 +49,7 @@ type Session struct {
 	// directly would carry none and be silently unrecoverable on resume.
 	following atomic.Bool
 
-	frames chan *[]byte
+	queue *sendQueue
 
 	sendClosed    chan struct{}
 	closeSendOnce sync.Once
@@ -178,29 +178,30 @@ func (s *Session) emit(ctx context.Context, ev wire.Event, p Payload) error {
 }
 
 func (s *Session) enqueue(ctx context.Context, buf *[]byte) error {
+	return s.enqueueFrame(ctx, queuedFrame{buf: buf})
+}
+
+func (s *Session) enqueueFrame(ctx context.Context, qf queuedFrame) error {
 	select {
 	case <-s.done:
-		putBuf(buf)
+		putBuf(qf.buf)
 		return s.endErr()
 	case <-s.sendClosed:
-		putBuf(buf)
+		putBuf(qf.buf)
 		return ErrSessionClosed
+	case <-s.stop:
+		putBuf(qf.buf)
+		return ErrShuttingDown
 	default:
 	}
-
-	select {
-	case s.frames <- buf:
-		return nil
-	case <-s.done:
-		putBuf(buf)
+	err := s.queue.push(ctx, qf, s.done)
+	if errors.Is(err, ErrSessionClosed) {
+		// The queue closes when the writer exits. If the writer exited because
+		// the connection failed, that is the useful error, not the generic
+		// one: the caller wants to know the client is gone (RF-A9).
 		return s.endErr()
-	case <-s.stop:
-		putBuf(buf)
-		return ErrShuttingDown
-	case <-ctx.Done():
-		putBuf(buf)
-		return ctx.Err()
 	}
+	return err
 }
 
 func (s *Session) endErr() error {
@@ -233,6 +234,7 @@ func (s *Session) requestStop() {
 // pump owns the transport. It is the only goroutine that writes to it.
 func (s *Session) pump() {
 	defer close(s.done)
+	defer s.queue.close()
 
 	var timer *time.Timer
 	var tick <-chan time.Time
@@ -250,8 +252,8 @@ func (s *Session) pump() {
 
 	for {
 		select {
-		case buf := <-s.frames:
-			if err := s.writeFrame(buf); err != nil {
+		case <-s.queue.signal:
+			if err := s.flushQueue(); err != nil {
 				s.fail(err)
 				return
 			}
@@ -286,20 +288,26 @@ func (s *Session) pump() {
 // finishing and being shut down has both channels ready at once, and the select
 // picks between them at random.
 func (s *Session) drain() {
+	if err := s.flushQueue(); err != nil {
+		s.fail(err)
+		return
+	}
+	if s.stopRequested() {
+		if err := s.writeClosing(); err != nil {
+			s.fail(err)
+		}
+	}
+}
+
+// flushQueue writes everything currently queued.
+func (s *Session) flushQueue() error {
 	for {
-		select {
-		case buf := <-s.frames:
-			if err := s.writeFrame(buf); err != nil {
-				s.fail(err)
-				return
-			}
-		default:
-			if s.stopRequested() {
-				if err := s.writeClosing(); err != nil {
-					s.fail(err)
-				}
-			}
-			return
+		qf, ok := s.queue.pop()
+		if !ok {
+			return nil
+		}
+		if err := s.writeFrame(qf.buf); err != nil {
+			return err
 		}
 	}
 }

@@ -156,6 +156,12 @@ const (
 	// GapUnresolvable means the cursor could not be decoded at all.
 	GapUnresolvable GapReason = "unresolvable"
 
+	// GapSlowConsumer means the subscriber could not keep up and its
+	// backpressure policy discarded events. They are gone for this connection;
+	// the client is told the range so it can reload state rather than assume
+	// the stream was continuous.
+	GapSlowConsumer GapReason = "slow-consumer"
+
 	// GapUnsupported means this stream does not retain history, so nothing
 	// could be replayed.
 	GapUnsupported GapReason = "unsupported"

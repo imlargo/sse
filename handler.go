@@ -114,7 +114,7 @@ func serve(ctx context.Context, t Transport, r *http.Request, fn StreamFunc, cfg
 		cfg:        cfg,
 		caps:       t.Capabilities(),
 		t:          t,
-		frames:     make(chan *[]byte, cfg.sendQueue),
+		queue:      newSendQueue(cfg.backpressure),
 		sendClosed: make(chan struct{}),
 		stop:       make(chan struct{}),
 		done:       make(chan struct{}),
