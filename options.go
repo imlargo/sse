@@ -39,7 +39,28 @@ type config struct {
 	logger       *slog.Logger
 	lifecycle    *Lifecycle
 	fullDuplex   bool
+	log          Log
+	logID        LogID
+	start        StartPosition
 }
+
+// A StartPosition says where a client with no resolvable cursor begins.
+type StartPosition int
+
+const (
+	// StartOldest replays everything the log still retains. It is the default:
+	// if retention was configured, it was configured so clients could have
+	// that history, and withholding it from a fresh client is surprising.
+	//
+	// It degenerates correctly. A log with no configured retention keeps only
+	// the small in-flight window, so this is effectively "from now".
+	StartOldest StartPosition = iota
+
+	// StartTail delivers only events published from now on. This is what a
+	// high-frequency dashboard or ticker wants: a new viewer should see the
+	// current state, not an hour of backlog.
+	StartTail
+)
 
 func newConfig(opts []Option) (*config, error) {
 	c := &config{
@@ -211,6 +232,42 @@ func WithLifecycle(l *Lifecycle) Option {
 		}
 		c.lifecycle = l
 		return nil
+	}
+}
+
+// WithLog attaches a log to the handler, which turns on resumption.
+//
+// The name identifies the log inside a resumption cursor. It is hashed rather
+// than assigned, so it is stable across nodes and restarts with no
+// coordination — a client can reconnect to a different replica and still be
+// understood.
+//
+// Attaching a log is what makes [Session.Follow] and [Follow] usable, and it is
+// what lets the capability event tell a client truthfully whether it can resume.
+func WithLog(name string, log Log) Option {
+	return func(c *config) error {
+		if log == nil {
+			return fmt.Errorf("sse: WithLog: log must not be nil")
+		}
+		if name == "" {
+			return fmt.Errorf("sse: WithLog: name must not be empty; it identifies the log in a resumption cursor")
+		}
+		c.log = log
+		c.logID = NewLogID(name)
+		return nil
+	}
+}
+
+// WithStart sets where a client with no resolvable cursor begins reading.
+func WithStart(p StartPosition) Option {
+	return func(c *config) error {
+		switch p {
+		case StartOldest, StartTail:
+			c.start = p
+			return nil
+		default:
+			return fmt.Errorf("sse: WithStart: unknown start position %d", p)
+		}
 	}
 }
 

@@ -36,6 +36,14 @@ var (
 	// namespace (RF-E4).
 	ErrReservedName = errors.New("sse: event name is reserved by the library")
 
+	// ErrFollowing means Send was called on a session that is streaming a log.
+	//
+	// A session has one source of event ids. An event sent directly while a log
+	// is being followed would carry no position, so a client that reconnected
+	// would never recover it — a silent loss, which is the one thing this
+	// library will not do. Publish it to the log instead.
+	ErrFollowing = errors.New("sse: cannot Send while following a log; publish to the log instead")
+
 	// ErrShuttingDown means the server is draining and stopped accepting new
 	// events on this session.
 	ErrShuttingDown = errors.New("sse: server is shutting down")

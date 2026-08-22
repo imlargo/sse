@@ -12,6 +12,7 @@ import (
 	"runtime/debug"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/imlargo/sse/wire"
@@ -35,6 +36,19 @@ type Session struct {
 	caps Capabilities
 	t    Transport
 
+	// Resumption state, resolved once before anything is written.
+	log       Log
+	logID     LogID
+	epoch     Epoch
+	cursor    Cursor
+	resumeGap *Gap
+	resumable bool
+
+	// following guards against mixing two sources of truth on one session:
+	// while a log is being streamed, ids come from the log, and an event sent
+	// directly would carry none and be silently unrecoverable on resume.
+	following atomic.Bool
+
 	frames chan *[]byte
 
 	sendClosed    chan struct{}
@@ -52,7 +66,11 @@ type Session struct {
 // A SendOption adjusts a single event.
 type SendOption func(*sendOpts)
 
-type sendOpts struct{ name string }
+type sendOpts struct {
+	name      string
+	key       string
+	ephemeral bool
+}
 
 // Name sets the event type, which is what a client dispatches on. Without it
 // the client sees the default "message" type.
@@ -102,6 +120,10 @@ func (s *Session) Send(ctx context.Context, v any, opts ...SendOption) error {
 	if o.name != "" && strings.HasPrefix(o.name, s.cfg.prefix) {
 		return fmt.Errorf("%w: %q starts with the reserved prefix %q",
 			ErrReservedName, o.name, s.cfg.prefix)
+	}
+
+	if s.following.Load() {
+		return ErrFollowing
 	}
 
 	p, ok := v.(Payload)

@@ -2,6 +2,7 @@ package sse
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 )
@@ -117,7 +118,14 @@ func serve(ctx context.Context, t Transport, r *http.Request, fn StreamFunc, cfg
 		sendClosed: make(chan struct{}),
 		stop:       make(chan struct{}),
 		done:       make(chan struct{}),
+		log:        cfg.log,
+		logID:      cfg.logID,
 	}
+
+	// Work out where this client is before a single byte is written, so the
+	// capability event can tell it the truth and any gap can be declared ahead
+	// of everything else.
+	s.resolveResumption(ctx, r)
 
 	// A node that is already draining must still answer 200.
 	//
@@ -215,9 +223,53 @@ func (s *Session) writeOpen() error {
 		}
 	}
 
-	body := fmt.Sprintf(
-		`{"sessionId":%q,"resumable":false,"delivery":"at-most-once","recovery":"none","keepAliveMs":%d,"retryMs":%d}`,
-		s.id, s.cfg.keepAlive.Milliseconds(), s.cfg.retry.Milliseconds(),
-	)
-	return s.emit(context.Background(), wireOpenEvent(s), Raw([]byte(body)))
+	body, err := json.Marshal(s.capabilities())
+	if err != nil {
+		return err
+	}
+	return s.emit(context.Background(), wireOpenEvent(s), Raw(body))
+}
+
+// openPayload is what the client is told the moment the stream opens.
+//
+// It exists because a client that is never told it cannot resume will assume it
+// can. Stating the delivery semantics out loud is run-time self-documentation,
+// and it is the difference between a weaker guarantee that is understood and a
+// stronger one that is implied and untrue (RF-E3, RF-C2).
+type openPayload struct {
+	SessionID string `json:"sessionId"`
+	Resumable bool   `json:"resumable"`
+	Delivery  string `json:"delivery"`
+	Recovery  string `json:"recovery"`
+
+	// RetentionMs and RetentionEvents describe the window the client can
+	// actually come back into, present only when there is one.
+	RetentionMs     int64 `json:"retentionMs,omitempty"`
+	RetentionEvents int   `json:"retentionEvents,omitempty"`
+
+	KeepAliveMs int64 `json:"keepAliveMs"`
+	RetryMs     int64 `json:"retryMs"`
+}
+
+func (s *Session) capabilities() openPayload {
+	p := openPayload{
+		SessionID:   s.id,
+		Resumable:   s.resumable,
+		Delivery:    "at-most-once",
+		Recovery:    "none",
+		KeepAliveMs: s.cfg.keepAlive.Milliseconds(),
+		RetryMs:     s.cfg.retry.Milliseconds(),
+	}
+	if s.resumable {
+		// With retention the promise is at-least-once *within the window*, and
+		// never more than that. Duplicates are possible on resume; exactly-once
+		// is not on offer and is not implied.
+		p.Delivery = "at-least-once-within-retention"
+		p.Recovery = "replay"
+		if info, err := s.log.Info(context.Background()); err == nil {
+			p.RetentionMs = info.Retention.For.Milliseconds()
+			p.RetentionEvents = info.Retention.Events
+		}
+	}
+	return p
 }
