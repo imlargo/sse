@@ -120,6 +120,10 @@ type queuedFrame struct {
 	buf    *[]byte
 	key    string
 	offset Offset // position in the log, or 0 for an event not from one
+	topic  string
+	// published is when the event entered the log, so delivery latency is
+	// measured from publication rather than from when the writer got to it.
+	published time.Time
 }
 
 // dropRecord accumulates what a subscriber lost, so it can be declared as one
@@ -141,9 +145,10 @@ type sendQueue struct {
 	bytes int
 	keys  map[string]int // key -> index, only populated for Coalesce
 
-	bp     Backpressure
-	drops  dropRecord
-	closed bool
+	bp           Backpressure
+	drops        dropRecord
+	droppedTopic string
+	closed       bool
 
 	// signal wakes the writer; space wakes a producer blocked for room. Both
 	// have capacity one and carry no data: they exist so the queue composes
@@ -213,6 +218,7 @@ func (q *sendQueue) push(ctx context.Context, qf queuedFrame, done <-chan struct
 		case DropNewest:
 			// Keep what is queued; the arriving event is the casualty.
 			q.recordDrop(qf.offset, qf.offset)
+			q.droppedTopic = qf.topic
 			q.mu.Unlock()
 			putBuf(qf.buf)
 			notify(q.signal)

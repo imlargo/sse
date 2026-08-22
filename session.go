@@ -36,6 +36,9 @@ type Session struct {
 	caps Capabilities
 	t    Transport
 
+	// grant is what the authorizer decided, resolved before the stream opened.
+	grant Grant
+
 	// Resumption state, resolved once before anything is written.
 	log       Log
 	logID     LogID
@@ -61,6 +64,13 @@ type Session struct {
 
 	stop     chan struct{}
 	stopOnce sync.Once
+
+	// cancelStream unblocks the application's stream function when the session
+	// is told to stop. Stopping the writer is not enough on its own: a stream
+	// function waiting on a log would otherwise sit there until its own
+	// context ended, which for a graceful drain or an expiring credential is
+	// never.
+	cancelStream context.CancelFunc
 
 	done chan struct{} // closed when the writer goroutine has exited
 
@@ -234,7 +244,12 @@ func (s *Session) closeSend() {
 // requestStop asks the session to drain and finish, which is what a graceful
 // shutdown does to every live session.
 func (s *Session) requestStop() {
-	s.stopOnce.Do(func() { close(s.stop) })
+	s.stopOnce.Do(func() {
+		close(s.stop)
+		if s.cancelStream != nil {
+			s.cancelStream()
+		}
+	})
 }
 
 // pump owns the transport. It is the only goroutine that writes to it.
@@ -319,9 +334,17 @@ func (s *Session) flushQueue() error {
 		if !ok {
 			return nil
 		}
+		n := len(*qf.buf)
 		if err := s.writeFrame(qf.buf); err != nil {
 			return err
 		}
+		if !qf.published.IsZero() {
+			// Publication to delivery, which is the number that says whether
+			// subscribers are keeping up.
+			s.cfg.metrics.eventDelivered(qf.topic, n, time.Since(qf.published))
+		}
+		events, bytes := s.queue.depth()
+		s.cfg.metrics.queueDepth(s.id, events, bytes)
 	}
 }
 

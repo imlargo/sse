@@ -115,6 +115,7 @@ func (s *Session) follow(ctx context.Context, filters []Filter) error {
 		// next event, so the client never receives a stream with an
 		// unannounced hole in it (RF-D5).
 		if d, ok := s.queue.takeDrops(); ok {
+			s.cfg.metrics.eventDropped(entry.Frame.Topic, string(GapSlowConsumer), d.count)
 			if err := s.writeGap(ctx, &Gap{
 				Reason: GapSlowConsumer, From: d.from, Through: d.to,
 			}); err != nil {
@@ -187,7 +188,10 @@ func (s *Session) writeEntry(ctx context.Context, e Entry) error {
 			ErrEventTooLarge, len(out), s.cfg.maxEventSize)
 	}
 	*buf = out
-	return s.enqueueFrame(ctx, queuedFrame{buf: buf, key: e.Frame.Key, offset: e.Offset})
+	return s.enqueueFrame(ctx, queuedFrame{
+		buf: buf, key: e.Frame.Key, offset: e.Offset,
+		topic: e.Frame.Topic, published: e.Frame.Time,
+	})
 }
 
 // gapPayload is what a client receives when history could not be provided.
@@ -206,6 +210,7 @@ type gapPayload struct {
 // event, in the reserved namespace so it can never be confused with an
 // application event.
 func (s *Session) writeGap(ctx context.Context, g *Gap) error {
+	s.cfg.metrics.gapDeclared(g.Reason)
 	body, err := json.Marshal(gapPayload{
 		Reason:  g.Reason,
 		From:    g.From,

@@ -105,6 +105,13 @@ func (b *Broker) Subscribe(ctx context.Context, s *Session, filters ...Filter) e
 // job of authorization.
 func (b *Broker) Handler(opts ...Option) http.Handler {
 	inner := b.HandlerFunc(func(ctx context.Context, s *Session) error {
+		// An authorizer, when there is one, decides the subscription: it has
+		// seen the request and can accept, narrow or refuse what was asked
+		// for. Query parameters are the fallback for a stream with no
+		// authorization at all.
+		if g := s.Grant(); len(g.Filters) > 0 || len(g.Denied) > 0 {
+			return b.Subscribe(ctx, s, g.Filters...)
+		}
 		filters, _ := s.Request().Context().Value(filtersKey{}).([]Filter)
 		return b.Subscribe(ctx, s, filters...)
 	}, opts...)
@@ -134,6 +141,12 @@ type filtersKey struct{}
 // query string.
 func (b *Broker) HandlerFunc(fn StreamFunc, opts ...Option) http.Handler {
 	all := append([]Option{WithLog(b.name, b.log)}, b.cfg.inherited()...)
+	if b.cfg.authorizer != nil {
+		all = append(all, WithAuthorizer(b.cfg.authorizer))
+	}
+	if b.cfg.metrics != nil {
+		all = append(all, WithMetrics(b.cfg.metrics))
+	}
 	return Handler(fn, append(all, opts...)...)
 }
 

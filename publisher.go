@@ -100,6 +100,8 @@ func (p *Publisher) Publish(ctx context.Context, v any, opts ...SendOption) (Off
 			ErrEventTooLarge, len(encoded), p.cfg.maxEventSize)
 	}
 
+	p.cfg.metrics.eventPublished(o.topic.String(), len(encoded))
+
 	return p.log.Append(ctx, Frame{
 		Body:      encoded,
 		Topic:     o.topic.String(),

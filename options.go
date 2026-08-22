@@ -41,6 +41,8 @@ type config struct {
 	log          Log
 	logID        LogID
 	start        StartPosition
+	authorizer   Authorizer
+	metrics      *Metrics
 }
 
 // inherited returns the broker's configuration as options, so a handler built
@@ -280,6 +282,34 @@ func WithLog(name string, log Log) Option {
 		}
 		c.log = log
 		c.logID = NewLogID(name)
+		return nil
+	}
+}
+
+// WithAuthorizer sets the decision point that runs before the stream opens.
+//
+// It is where the application sees the whole request and decides whether to
+// accept it, who it is, what it may subscribe to and under what policy. A
+// rejection is an ordinary HTTP response with a status code, sent while there
+// is still a status to send (RF-F1).
+func WithAuthorizer(a Authorizer) Option {
+	return func(c *config) error {
+		if a == nil {
+			return fmt.Errorf("sse: WithAuthorizer: authorizer must not be nil")
+		}
+		c.authorizer = a
+		return nil
+	}
+}
+
+// WithMetrics installs observation hooks.
+//
+// Metrics go through a plain struct of optional functions rather than an
+// interface, so the core imposes no dependency: Prometheus and OpenTelemetry
+// integrations live in their own modules (RNF-9). Unset hooks cost nothing.
+func WithMetrics(m *Metrics) Option {
+	return func(c *config) error {
+		c.metrics = m
 		return nil
 	}
 }

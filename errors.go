@@ -52,6 +52,10 @@ var (
 	// startup rather than leaving it to be discovered (RF-D6).
 	ErrSlowConsumer = errors.New("sse: consumer is too slow")
 
+	// errDeadlineReached ends a session whose grant expired. It is internal:
+	// the client sees a normal close and reconnects with fresh credentials.
+	errDeadlineReached = errors.New("sse: grant deadline reached")
+
 	// ErrShuttingDown means the server is draining and stopped accepting new
 	// events on this session.
 	ErrShuttingDown = errors.New("sse: server is shutting down")
