@@ -2,6 +2,7 @@ package sse_test
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -10,6 +11,9 @@ import (
 
 	"github.com/imlargo/sse"
 )
+
+// benchLarge opts into the sizes that take minutes to set up.
+var benchLarge = flag.Bool("sse.bench.large", false, "include the 15,000-subscriber wake-up benchmark")
 
 // The benchmark the repository was missing.
 //
@@ -30,7 +34,13 @@ func BenchmarkWakeup(b *testing.B) {
 	// everything must be woken by everything, so they all share one bucket.
 	// That is what every subscriber used to do regardless of its filter, so
 	// comparing against it measures exactly what the change bought.
-	for _, subscribers := range []int{1_000, 5_000, 15_000} {
+	// 1k and 5k already show the shape; 15k costs minutes of setup on a small
+	// runner and is reachable through TestSoak when the real number is wanted.
+	sizes := []int{1_000, 5_000}
+	if !testing.Short() && *benchLarge {
+		sizes = append(sizes, 15_000)
+	}
+	for _, subscribers := range sizes {
 		for _, mode := range []string{"unfiltered", "per-user-hit", "per-user-miss"} {
 			b.Run(fmt.Sprintf("%s/%d", mode, subscribers), func(b *testing.B) {
 				benchWakeup(b, subscribers, mode)

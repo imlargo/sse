@@ -14,7 +14,7 @@ race:
 
 ## bench: hot-path benchmarks with the allocation budget (RNF-3, RP-6)
 bench:
-	$(GO) test -run '^$$' -bench . -benchmem ./...
+	$(GO) test -run '^$$' -bench . -benchmem -timeout 10m ./...
 
 ## fuzz: short fuzzing pass over the parser (RP-2)
 fuzz:

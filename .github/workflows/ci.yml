@@ -71,8 +71,13 @@ jobs:
           go-version: '1.26'
       # RNF-3: the allocation budget is asserted by a test, so a regression
       # fails CI instead of being noticed later.
+      # Bounded on purpose. Go sizes the iteration count from an early, fast
+      # probe, so a benchmark that degrades as it runs — anything accidentally
+      # quadratic — gets extrapolated into millions of iterations and the job
+      # hangs until the platform kills it. A timeout turns that into a failure
+      # that names itself.
       - name: Benchmarks
-        run: go test -run '^$' -bench . -benchmem ./...
+        run: go test -run '^$' -bench . -benchmem -timeout 10m ./...
 
   # Integration tests for the distribution seam. They need a real Redis: an
   # adapter that has only been tested against a fake is not tested.

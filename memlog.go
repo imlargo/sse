@@ -28,7 +28,11 @@ type MemoryLog struct {
 	retention Retention
 	resumable bool
 
+	// entries holds the retained window. The live entries are entries[head:];
+	// evicting advances head rather than moving anything, so an append stays
+	// constant-time however much history is being kept.
 	entries []Entry
+	head    int
 	next    Offset
 	evicted Offset
 	bytes   int
@@ -116,9 +120,10 @@ func (l *MemoryLog) Append(ctx context.Context, f Frame) (Offset, error) {
 // with the write lock held.
 func (l *MemoryLog) trim(now time.Time) {
 	r := l.retention
+	live := l.live()
 	drop := 0
-	for drop < len(l.entries) {
-		e := l.entries[drop]
+	for drop < len(live) {
+		e := live[drop]
 		// An ephemeral entry ages out on the short in-flight window rather than
 		// the configured one, so a high-frequency ticker cannot push out the
 		// history the log is keeping for everything else. It is still evicted
@@ -128,7 +133,7 @@ func (l *MemoryLog) trim(now time.Time) {
 		if e.Frame.Ephemeral && (maxAge == 0 || defaultWindow.For < maxAge) {
 			maxAge = defaultWindow.For
 		}
-		over := (r.Events > 0 && len(l.entries)-drop > r.Events) ||
+		over := (r.Events > 0 && len(live)-drop > r.Events) ||
 			(r.Bytes > 0 && l.bytes > r.Bytes) ||
 			(maxAge > 0 && now.Sub(e.Frame.Time) > maxAge)
 		if !over {
@@ -138,12 +143,34 @@ func (l *MemoryLog) trim(now time.Time) {
 		l.evicted = e.Offset
 		drop++
 	}
-	if drop > 0 {
-		// Copy rather than reslice so the dropped frames become collectable
-		// instead of being pinned by the backing array.
-		l.entries = append(l.entries[:0:0], l.entries[drop:]...)
+	if drop == 0 {
+		return
+	}
+
+	// Release the frames so they can be collected. Advancing head alone would
+	// leave the backing array holding them for as long as the log lives, which
+	// for a log retaining tens of thousands of events is most of the memory.
+	for i := l.head; i < l.head+drop; i++ {
+		l.entries[i] = Entry{}
+	}
+	l.head += drop
+
+	// Reclaim the dead prefix once it is worth the copy. Copying on every
+	// eviction instead — which is what rebuilding the slice amounts to — makes
+	// an append cost O(retained), so a log holding ten thousand events spends a
+	// megabyte and most of a millisecond on every single publish.
+	if l.head >= 64 && l.head*2 >= len(l.entries) {
+		live := copy(l.entries, l.entries[l.head:])
+		for i := live; i < len(l.entries); i++ {
+			l.entries[i] = Entry{}
+		}
+		l.entries = l.entries[:live]
+		l.head = 0
 	}
 }
+
+// live returns the entries still retained. Callers hold at least a read lock.
+func (l *MemoryLog) live() []Entry { return l.entries[l.head:] }
 
 func (l *MemoryLog) Read(ctx context.Context, after Offset, opts ReadOptions) (Reader, error) {
 	l.mu.RLock()
@@ -179,8 +206,8 @@ func (l *MemoryLog) Info(ctx context.Context) (LogInfo, error) {
 		Resumable:      l.resumable,
 		Retention:      l.retention,
 	}
-	if len(l.entries) > 0 {
-		info.Oldest = l.entries[0].Offset
+	if live := l.live(); len(live) > 0 {
+		info.Oldest = live[0].Offset
 	}
 	return info, nil
 }
@@ -227,7 +254,8 @@ func (r *memReader) Next(ctx context.Context) (Entry, error) {
 		// There is no separate "replay" and "live" mode here. The position
 		// simply advances, which is why the handover between them cannot race
 		// (RF-C6) — there is no handover.
-		i, _ := slices.BinarySearchFunc(r.log.entries, r.pos, func(e Entry, pos Offset) int {
+		live := r.log.live()
+		i, _ := slices.BinarySearchFunc(live, r.pos, func(e Entry, pos Offset) int {
 			switch {
 			case e.Offset <= pos:
 				return -1
@@ -235,8 +263,8 @@ func (r *memReader) Next(ctx context.Context) (Entry, error) {
 				return 1
 			}
 		})
-		if i < len(r.log.entries) {
-			e := r.log.entries[i]
+		if i < len(live) {
+			e := live[i]
 			r.pos = e.Offset
 			r.log.mu.RUnlock()
 			return e, nil

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"runtime"
 	"strconv"
 	"sync"
 	"testing"
@@ -523,5 +524,82 @@ func TestFanoutCostIsIndependentOfSubscriberCount(t *testing.T) {
 		t.Errorf("fan-out allocates %.1f per event at 200 subscribers versus %.1f at 1: "+
 			"the cost is scaling with the audience, so the event is being re-encoded per subscriber",
 			many, one)
+	}
+}
+
+// Appending must cost the same whether the log is empty or full.
+//
+// It did not. Evicting used to rebuild the retained window, so once retention
+// was reached every publish allocated and copied the whole thing — measured in
+// CI at 848 microseconds and 1.1 MB per append on a log holding ten thousand
+// events, which is also what turned the benchmark job into an hour-long hang.
+//
+// The shape of the bug is what makes it worth pinning: it is invisible until
+// the log fills, and every test that appends a few dozen events sees nothing.
+func TestAppendCostDoesNotGrowWithRetention(t *testing.T) {
+	measure := func(retained int) (float64, int) {
+		l := sse.NewMemoryLog(sse.Retention{Events: retained})
+		defer l.Close()
+		ctx := context.Background()
+		f := frame("event: token\ndata: the quick brown fox\n\n")
+
+		// Fill it, so eviction is happening on every append that follows.
+		for range retained * 2 {
+			if _, err := l.Append(ctx, f); err != nil {
+				t.Fatal(err)
+			}
+		}
+		allocs := testing.AllocsPerRun(500, func() {
+			if _, err := l.Append(ctx, f); err != nil {
+				t.Fatal(err)
+			}
+		})
+		info, _ := l.Info(ctx)
+		return allocs, int(info.Newest - info.Oldest + 1)
+	}
+
+	small, smallHeld := measure(100)
+	large, largeHeld := measure(20_000)
+	t.Logf("appending to a full log: %.1f allocs holding %d events, %.1f holding %d",
+		small, smallHeld, large, largeHeld)
+
+	if large > small+1 {
+		t.Errorf("appending costs %.1f allocations on a log retaining %d events "+
+			"against %.1f on one retaining %d: the cost is scaling with how much "+
+			"history is kept", large, largeHeld, small, smallHeld)
+	}
+}
+
+// Evicted entries must become collectable. Advancing a read position without
+// releasing them would leave the backing array holding every frame the log ever
+// saw, which for a long-lived stream is most of the memory.
+func TestEvictedFramesAreReleased(t *testing.T) {
+	l := sse.NewMemoryLog(sse.Retention{Events: 64})
+	defer l.Close()
+	ctx := context.Background()
+
+	// Frames large enough that retaining them all would be obvious.
+	big := make([]byte, 64<<10)
+	f := sse.Frame{Body: big}
+
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+
+	for range 2_000 {
+		if _, err := l.Append(ctx, f); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runtime.GC()
+	runtime.ReadMemStats(&after)
+
+	// 2,000 appends of 64 KiB is 128 MB if nothing is released; the window
+	// holds 64, so about 4 MB is the honest figure. Allow generous slack for
+	// the runtime and still catch retention of everything.
+	growth := int64(after.HeapInuse) - int64(before.HeapInuse)
+	t.Logf("heap grew %d KB while appending 128 MB through a 64-event window", growth>>10)
+	if growth > 32<<20 {
+		t.Errorf("heap grew %d MB: evicted frames are being retained", growth>>20)
 	}
 }
