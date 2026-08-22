@@ -1,10 +1,9 @@
-module github.com/imlargo/sse/examples/04-distributed
+module github.com/imlargo/sse/logs/redislog
 
 go 1.25.0
 
 require (
 	github.com/imlargo/sse v0.1.0
-	github.com/imlargo/sse/logs/redislog v0.1.0
 	github.com/redis/go-redis/v9 v9.22.0
 )
 
@@ -19,5 +18,3 @@ require (
 // by everyone who depends on it and would leave this requiring a version
 // of the core that does not resolve. `make release-check` enforces it.
 replace github.com/imlargo/sse => ../..
-
-replace github.com/imlargo/sse/logs/redislog => ../../logs/redislog

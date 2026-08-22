@@ -4,7 +4,7 @@ go 1.25.0
 
 require (
 	github.com/gin-gonic/gin v1.12.0
-	github.com/imlargo/sse v0.0.0
+	github.com/imlargo/sse v0.1.0
 	github.com/labstack/echo/v4 v4.15.4
 )
 
@@ -44,4 +44,8 @@ require (
 	google.golang.org/protobuf v1.36.10 // indirect
 )
 
+// Local development only. These are stripped at release time by
+// `make release-prep`, because a replace in a published module is ignored
+// by everyone who depends on it and would leave this requiring a version
+// of the core that does not resolve. `make release-check` enforces it.
 replace github.com/imlargo/sse => ..

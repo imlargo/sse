@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/imlargo/sse"
-	"github.com/imlargo/sse/logs/redis"
+	"github.com/imlargo/sse/logs/redislog"
 	"github.com/imlargo/sse/ssetest"
 	"github.com/imlargo/sse/wire"
 	goredis "github.com/redis/go-redis/v9"

@@ -1,6 +1,6 @@
 GO ?= go
 
-.PHONY: all test race bench fuzz soak deps redis compat fiber vet lint check cover clean
+.PHONY: all test race bench fuzz soak deps redis compat fiber vet lint check release-check release-prep cover clean
 
 all: vet lint test deps
 
@@ -22,7 +22,7 @@ fuzz:
 
 ## redis: integration tests for the distribution seam (needs a Redis)
 redis:
-	cd logs/redis && $(GO) test -race -count=1 ./...
+	cd logs/redislog && $(GO) test -race -count=1 ./...
 
 ## compat: third-party framework compatibility (Gin, Echo)
 compat:
@@ -30,11 +30,44 @@ compat:
 
 ## fiber: the adapter for the one framework that needs one
 fiber:
-	cd adapters/fiber && $(GO) test -race -count=1 ./...
+	cd adapters/fibersse && $(GO) test -race -count=1 ./...
 
 ## soak: RP-7, many connections with deliberately slow consumers
 soak:
 	$(GO) test -run TestSoak -v -timeout 15m -sse.soak.conns=15000 -sse.soak.duration=60s .
+
+# Submodules replace the core with a local path so this repository builds
+# against itself. That is correct during development and wrong once published:
+# a replace in a dependency is ignored by whoever depends on it, leaving the
+# module requiring a version of the core that does not resolve.
+SUBMODULES = logs/redislog adapters/fibersse
+
+## release-check: refuse to publish a submodule that still points at a local path
+release-check:
+	@fail=0; \
+	for m in $(SUBMODULES); do \
+		if grep -q '^replace github.com/imlargo/sse' $$m/go.mod; then \
+			echo "$$m/go.mod still replaces the core with a local path"; fail=1; \
+		fi; \
+		if grep -qE 'github.com/imlargo/sse v0\.0\.0' $$m/go.mod; then \
+			echo "$$m/go.mod requires a placeholder version of the core"; fail=1; \
+		fi; \
+	done; \
+	if [ $$fail -ne 0 ]; then \
+		echo; echo "Run: make release-prep VERSION=vX.Y.Z  (after tagging the core)"; \
+		exit 1; \
+	fi; \
+	echo "release-check ok: submodules are publishable"
+
+## release-prep: point the submodules at a published core. Tag the core first.
+release-prep:
+	@test -n "$(VERSION)" || { echo "usage: make release-prep VERSION=v0.1.0"; exit 1; }
+	@for m in $(SUBMODULES); do \
+		(cd $$m && $(GO) mod edit -dropreplace=github.com/imlargo/sse \
+			-require=github.com/imlargo/sse@$(VERSION)) || exit 1; \
+		echo "  $$m -> github.com/imlargo/sse@$(VERSION)"; \
+	done
+	@$(MAKE) release-check
 
 ## deps: RF-H1 — the root module must depend on the standard library only
 deps:
@@ -51,7 +84,7 @@ STATICCHECK ?= honnef.co/go/tools/cmd/staticcheck@latest
 
 # Every module, not just the root: the submodules are where third-party
 # dependencies live and are exactly where a lint finding is easiest to miss.
-MODULES = . logs/redis compat adapters/fiber examples/04-distributed
+MODULES = . logs/redislog compat adapters/fibersse examples/04-distributed
 
 vet:
 	@for m in $(MODULES); do echo "vet $$m"; (cd $$m && $(GO) vet ./...) || exit 1; done

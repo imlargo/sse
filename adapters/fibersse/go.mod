@@ -1,10 +1,10 @@
-module github.com/imlargo/sse/adapters/fiber
+module github.com/imlargo/sse/adapters/fibersse
 
 go 1.25.0
 
 require (
 	github.com/gofiber/fiber/v3 v3.5.0
-	github.com/imlargo/sse v0.0.0
+	github.com/imlargo/sse v0.1.0
 	github.com/valyala/fasthttp v1.73.0
 )
 
@@ -25,4 +25,8 @@ require (
 	golang.org/x/text v0.40.0 // indirect
 )
 
+// Local development only. These are stripped at release time by
+// `make release-prep`, because a replace in a published module is ignored
+// by everyone who depends on it and would leave this requiring a version
+// of the core that does not resolve. `make release-check` enforces it.
 replace github.com/imlargo/sse => ../..

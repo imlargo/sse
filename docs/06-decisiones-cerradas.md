@@ -411,10 +411,10 @@ github.com/imlargo/sse                  módulo raíz — SOLO stdlib
   sse/wire/                             formato de cable, valor autónomo
   sse/ssetest/                          transporte en memoria, helpers, detección de fugas
 
-github.com/imlargo/sse/logs/redis       módulos aparte, go.mod propio
+github.com/imlargo/sse/logs/redislog       módulos aparte, go.mod propio
 github.com/imlargo/sse/logs/nats
 github.com/imlargo/sse/adapters/gin
-github.com/imlargo/sse/adapters/fiber
+github.com/imlargo/sse/adapters/fibersse
 github.com/imlargo/sse/adapters/echo
 github.com/imlargo/sse/metrics/prometheus
 github.com/imlargo/sse/metrics/otel

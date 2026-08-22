@@ -13,7 +13,7 @@ import (
 
 	"github.com/gofiber/fiber/v3"
 	"github.com/imlargo/sse"
-	fibersse "github.com/imlargo/sse/adapters/fiber"
+	fibersse "github.com/imlargo/sse/adapters/fibersse"
 	"github.com/imlargo/sse/internal/leak"
 )
 

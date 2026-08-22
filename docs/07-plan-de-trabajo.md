@@ -209,7 +209,7 @@ Aquí se cobra la apuesta de D-03. Si la costura está bien cortada, esta fase e
 pequeña. **Si resulta grande, la costura estaba mal y hay que volver a la Fase 3**
 — es el punto de control real del diseño.
 
-- `logs/redis` sobre Redis Streams (`XADD`/`XRANGE`/`XAUTOCLAIM`, ID `ms-seq`,
+- `logs/redislog` sobre Redis Streams (`XADD`/`XRANGE`/`XAUTOCLAIM`, ID `ms-seq`,
   `MAXLEN` para retención). Detección de hueco = comparar contra la primera
   entrada viva del stream.
 - `logs/nats` sobre JetStream.
@@ -219,7 +219,7 @@ pequeña. **Si resulta grande, la costura estaba mal y hay que volver a la Fase 
 
 **Puerta de salida (RF-H5, RF-C3, RF-C11, RNF-12):** el ejemplo de nivel 3 es el
 de nivel 2 **con una línea cambiada**; prueba de reanudación cruzada entre nodos;
-`logs/redis` por debajo de ~250 líneas — si se pasa, la costura es demasiado
+`logs/redislog` por debajo de ~250 líneas — si se pasa, la costura es demasiado
 grande.
 
 ---
@@ -249,7 +249,7 @@ OpenAPI 3.2 válido y tipos TS utilizables, sin duplicar la declaración.
 
 ## Fase 8 · Adaptadores, documentación y congelación — L · *depende de todo*
 
-- `adapters/gin`, `adapters/echo`, `adapters/fiber`. **Fiber es el importante**
+- `adapters/gin`, `adapters/echo`, `adapters/fibersse`. **Fiber es el importante**
   (RF-H3): es el hueco documentado del ecosistema y donde el diseño de T-02 se
   demuestra — sin depender de `ctx.Done()`, no hay suscriptores zombi.
 - Los **cinco ejemplos** de `01`, ejecutables, en el repo. Son criterio de
@@ -284,7 +284,7 @@ Declarado aquí para que no se cuele por la puerta de atrás:
 
 | Riesgo | Mitigación |
 |---|---|
-| **La costura de D-03 resulta demasiado grande** y `logs/redis` acaba reimplementando lógica del núcleo | Es la puerta de salida explícita de la Fase 6. Si `logs/redis` pasa de ~250 líneas, se vuelve a la Fase 3. Detectarlo tarde es el fracaso caro de este proyecto |
+| **La costura de D-03 resulta demasiado grande** y `logs/redislog` acaba reimplementando lógica del núcleo | Es la puerta de salida explícita de la Fase 6. Si `logs/redislog` pasa de ~250 líneas, se vuelve a la Fase 3. Detectarlo tarde es el fracaso caro de este proyecto |
 | **Dos goroutines por sesión** a 50 000 conexiones = 100 000 goroutines | Coste conocido y declarado en los benchmarks desde la Fase 2, no descubierto en la Fase 8. Es el precio de que RF-A2 y RF-A5 sean ciertos a la vez |
 | El cursor vectorial **no cabe** en el presupuesto de cabecera con muchos logs | RF-C12 ya obliga a declarar `resumable: false` en vez de degradarse. La variante de handle en servidor existe como opción del 10% |
 | Un log único es **un punto de contención** de escritura | Append de bytes ya codificados con lock de nanosegundos, lectores sin lock vía offset atómico. Particionar en varios logs está disponible cuando haga falta, con la pérdida de orden global documentada |
@@ -305,5 +305,5 @@ Fases 1 y 2 en paralelo. Fase 7 en paralelo con 6. Todo lo demás es secuencial
 porque la dependencia es real, no organizativa.
 
 **El punto de control que importa es el final de la Fase 6.** Hasta ahí, el
-diseño es una hipótesis. Cuando `logs/redis` salga corto y el ejemplo de nivel 3
+diseño es una hipótesis. Cuando `logs/redislog` salga corto y el ejemplo de nivel 3
 sea el de nivel 2 con una línea cambiada, la hipótesis está confirmada.

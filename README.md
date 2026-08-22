@@ -344,7 +344,7 @@ context reports server shutdown rather than client disconnection — the
 documented hole where other libraries leak a subscriber per dropped client:
 
 ```go
-import fibersse "github.com/imlargo/sse/adapters/fiber"
+import fibersse "github.com/imlargo/sse/adapters/fibersse"
 
 app.Get("/events", fibersse.Handler(stream))
 ```
@@ -363,8 +363,8 @@ so `go get github.com/imlargo/sse` pulls nothing else.
 | `.../sse/wire` | The `text/event-stream` format on its own, with the conformance suite. |
 | `.../sse/openapi` | OpenAPI 3.2 generation from a declared event catalog. |
 | `.../sse/ssetest` | In-memory transport for tests. |
-| `.../sse/logs/redis` | Redis Streams log, for running on many nodes. |
-| `.../sse/adapters/fiber` | Fiber. |
+| `.../sse/logs/redislog` | Redis Streams log, for running on many nodes. |
+| `.../sse/adapters/fibersse` | Fiber. |
 
 ## Typed events and OpenAPI
 
@@ -417,19 +417,12 @@ make soak    # 15,000 connections with slow consumers
 make deps    # asserts the core still depends on nothing
 ```
 
-Things worth knowing before contributing:
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the repository layout, the
+conventions that are load-bearing rather than stylistic, and the release
+procedure.
 
-- **The conformance suite** (`wire/`) is derived from the WHATWG specification
-  and exported to `wire/testdata/conformance.json` so other implementations can
-  run the same vectors. Regenerate with `go test ./wire -run TestConformanceExport -update`.
-- **Leak detection runs in every package**, via `TestMain`. A test that leaks a
-  goroutine fails the package.
-- **Time-dependent behaviour is tested with `testing/synctest`**, not with
-  sleeps. Heartbeats, deadlines and retention windows are exact and instant.
-- **Allocation budgets are assertions, not benchmarks.** A regression fails CI.
-
-The design record, including the ten decisions this library is built on and why,
-is in [`context/06-decisiones-cerradas.md`](context/06-decisiones-cerradas.md).
+The design record — every decision, why it was made and what it gave up — is in
+[`docs/06-decisiones-cerradas.md`](docs/06-decisiones-cerradas.md).
 
 ## Stability
 

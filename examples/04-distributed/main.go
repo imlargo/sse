@@ -39,7 +39,7 @@ import (
 	"time"
 
 	"github.com/imlargo/sse"
-	"github.com/imlargo/sse/logs/redis"
+	"github.com/imlargo/sse/logs/redislog"
 	goredis "github.com/redis/go-redis/v9"
 )
 

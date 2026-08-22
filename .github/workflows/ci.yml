@@ -91,7 +91,7 @@ jobs:
         with:
           go-version: '1.26'
       - name: Redis Streams log
-        working-directory: logs/redis
+        working-directory: logs/redislog
         env:
           SSE_REDIS_ADDR: 127.0.0.1:6379
         run: go test -race -count=1 ./...
@@ -120,8 +120,21 @@ jobs:
         with:
           go-version: '1.26'
       - name: Fiber adapter
-        working-directory: adapters/fiber
+        working-directory: adapters/fibersse
         run: go test -race -count=1 ./...
+
+  # The submodules replace the core with a local path while developing. This
+  # does not fail the build — it reports, so the state is visible — but the
+  # release procedure requires it to be clean.
+  publishable:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+      - name: Are the submodules publishable?
+        run: make release-check || echo "::notice::submodules still point at local paths; see CONTRIBUTING.md#releasing"
 
   staticcheck:
     runs-on: ubuntu-latest
@@ -130,7 +143,7 @@ jobs:
       matrix:
         # Every module. The submodules are where third-party dependencies live
         # and are exactly where a finding is easiest to miss.
-        module: ['.', 'logs/redis', 'compat', 'adapters/fiber', 'examples/04-distributed']
+        module: ['.', 'logs/redislog', 'compat', 'adapters/fibersse', 'examples/04-distributed']
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
