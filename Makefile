@@ -1,6 +1,6 @@
 GO ?= go
 
-.PHONY: all test race bench fuzz deps redis compat vet lint check cover clean
+.PHONY: all test race bench fuzz deps redis compat fiber vet lint check cover clean
 
 all: vet lint test deps
 
@@ -28,6 +28,10 @@ redis:
 compat:
 	cd compat && $(GO) test -race -count=1 ./...
 
+## fiber: the adapter for the one framework that needs one
+fiber:
+	cd adapters/fiber && $(GO) test -race -count=1 ./...
+
 ## deps: RF-H1 — the root module must depend on the standard library only
 deps:
 	@out=$$($(GO) list -deps -f '{{if not .Standard}}{{.ImportPath}}{{end}}' ./... \
@@ -43,7 +47,7 @@ STATICCHECK ?= honnef.co/go/tools/cmd/staticcheck@latest
 
 # Every module, not just the root: the submodules are where third-party
 # dependencies live and are exactly where a lint finding is easiest to miss.
-MODULES = . logs/redis compat examples/04-distributed
+MODULES = . logs/redis compat adapters/fiber examples/04-distributed
 
 vet:
 	@for m in $(MODULES); do echo "vet $$m"; (cd $$m && $(GO) vet ./...) || exit 1; done

@@ -95,6 +95,20 @@ jobs:
         working-directory: compat
         run: go test -race -count=1 ./...
 
+  # Fiber is not built on net/http and its request context never reports a
+  # client disconnection, so it gets its own job rather than being assumed to
+  # work.
+  fiber:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+      - name: Fiber adapter
+        working-directory: adapters/fiber
+        run: go test -race -count=1 ./...
+
   staticcheck:
     runs-on: ubuntu-latest
     strategy:
@@ -102,7 +116,7 @@ jobs:
       matrix:
         # Every module. The submodules are where third-party dependencies live
         # and are exactly where a finding is easiest to miss.
-        module: ['.', 'logs/redis', 'compat', 'examples/04-distributed']
+        module: ['.', 'logs/redis', 'compat', 'adapters/fiber', 'examples/04-distributed']
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
