@@ -27,13 +27,14 @@
 //
 // # Usage
 //
+//	broker := sse.NewBroker("events", log)
+//
 //	app.Get("/events", fibersse.Handler(func(ctx context.Context, s *sse.Session) error {
-//	    for token := range model.Stream(ctx, prompt) {
-//	        if err := s.Send(ctx, sse.Text(token)); err != nil {
-//	            return err
-//	        }
+//	    filters, err := sse.FiltersFromQuery(s.Request(), sse.TopicQueryParam)
+//	    if err != nil {
+//	        return err
 //	    }
-//	    return nil
+//	    return broker.Subscribe(ctx, s, filters...)
 //	}))
 //
 // Everything else — heartbeats, backpressure, topics, resumption, graceful

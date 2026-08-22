@@ -22,14 +22,18 @@ type StreamFunc func(ctx context.Context, s *Session) error
 
 // Handler returns an http.Handler that runs fn as a server-sent event stream.
 //
-//	http.Handle("/chat", sse.Handler(func(ctx context.Context, s *sse.Session) error {
-//	    for token := range model.Stream(ctx, prompt) {
-//	        if err := s.Send(ctx, sse.Text(token)); err != nil {
+//	http.Handle("/progress", sse.Handler(func(ctx context.Context, s *sse.Session) error {
+//	    for _, step := range job.Steps() {
+//	        if err := s.Send(ctx, step, sse.Name("progress")); err != nil {
 //	            return err
 //	        }
 //	    }
 //	    return nil
 //	}))
+//
+// This is the single-client shape, where no fan-out is instantiated and none is
+// paid for. For many subscribers with different interests, see [Broker], which
+// builds its own handler and needs no stream function at all.
 //
 // Handler panics if an option is invalid, because options are constants
 // evaluated once at startup and a bad one is a programming error, not a runtime

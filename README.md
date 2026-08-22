@@ -1,7 +1,8 @@
 # sse
 
-**Server-Sent Events for Go.** A fan-out system with per-connection flow control
-and a resumption contract that is honest about what it can and cannot deliver.
+**Server-Sent Events for Go.** Per-user notifications, live dashboards and
+activity feeds — with topic routing, backpressure you choose, and resumption
+that tells a client when it missed something instead of pretending it did not.
 
 [![CI](https://github.com/imlargo/sse/actions/workflows/ci.yml/badge.svg)](https://github.com/imlargo/sse/actions/workflows/ci.yml)
 [![Go Reference](https://pkg.go.dev/badge/github.com/imlargo/sse.svg)](https://pkg.go.dev/github.com/imlargo/sse)
@@ -9,42 +10,56 @@ and a resumption contract that is honest about what it can and cannot deliver.
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 ```go
-http.Handle("/chat", sse.Handler(func(ctx context.Context, s *sse.Session) error {
-    for token := range model.Stream(ctx, prompt) {
-        if err := s.Send(ctx, sse.Text(token)); err != nil {
-            return err
-        }
-    }
-    return nil
-}))
+b := sse.NewBroker("events", sse.NewMemoryLog(sse.Retention{For: 5 * time.Minute}))
+
+// Subscribers pick what they want: /events?topic=org.42.>
+http.Handle("/events", b.Handler())
+
+// One publish reaches everyone listening for it.
+b.Publish(ctx, sse.MustTopic("org.42.tickets"), ticket, sse.Name("ticket.created"))
 ```
 
-No headers. No `Flush`. No heartbeat timer. No write deadline. No disconnect
-handling. The only loop is over your own data.
+That is the whole server. No subscriber registry, no fan-out goroutine, no
+headers, no `Flush`, no heartbeat timer, no write deadline, no reconnection
+handling, no code that runs per connection.
 
 ---
 
 ## Why another one
 
-The hard part of SSE was never the wire format — that is a few text fields. The
-hard part is everything a production stream needs around it, and that is where
-the existing libraries stop.
+Pushing text down one connection is easy, and if that is all you need the
+standard library will do it in forty lines. What is not easy is everything that
+shows up the moment there is more than one connection and more than one kind of
+event — and that is where the existing libraries stop.
 
-- **The library owns the write loop.** Because it does, it can own heartbeats,
-  write deadlines, replay ordering and graceful drain — and improve any of them
-  without breaking a single caller. If you write the loop, nobody can.
-- **Resumption that works with more than one topic.** `Last-Event-ID` is a
-  single scalar, which cannot describe a connection drawing from several
-  sources. Libraries that pretend otherwise lose events silently. Here the
-  resumption cursor is a vector over logs, 31 bytes in the common case.
-- **It never pretends.** When history cannot be replayed, the client is told —
-  with the range that was lost and a reason it can branch on. A declared failure
-  is fine; a silent one corrupts the client's state.
-- **Backpressure is a first-class choice**, including coalescing, which is what
-  dashboards and state synchronisation actually need and almost nothing offers.
+- **One slow subscriber cannot affect anybody else.** Publishing appends to a
+  log and returns; it never touches a subscriber at all. This is structural, not
+  tuned. The most popular Go alternative writes to subscribers synchronously
+  inside its dispatch loop, so one blocked client makes every other client wait.
+- **Backpressure is a choice you make**, including **coalescing** — a subscriber
+  that falls behind catches up to the *current* value of each entity instead of
+  replaying every intermediate one. It is what dashboards and state
+  synchronisation actually need and almost nothing offers.
+- **Topic routing that maps onto real brokers.** `tenant.acme.>` is the same
+  grammar NATS and MQTT use, deliberately, so filtering can be pushed down
+  rather than every node receiving the whole cluster's traffic.
+- **Resumption that works with more than one topic.** `Last-Event-ID` is one
+  scalar, which cannot describe a connection drawing from several sources.
+  Libraries that pretend otherwise lose events silently. Here the cursor is a
+  vector over logs — 31 bytes in the common case.
+- **It never pretends.** When something could not be delivered — aged out,
+  dropped for being too slow, a cursor from before a restart — the client is
+  told, with the range and a reason it can branch on. A declared failure is
+  fine; a silent one corrupts the client's state.
 - **One node or many is one line.** Swap the in-memory log for Redis Streams and
   a client can reconnect to *any* replica and resume. No sticky sessions.
+- **The library owns the write loop**, which is why it can own heartbeats, write
+  deadlines, replay ordering and graceful drain — and improve them without
+  breaking a caller. If you write the loop, nobody can.
 - **Zero dependencies in the core**, checked by CI, not promised.
+
+If you only ever have one client per stream and no history, this is more
+machinery than you need; reach for the standard library or something smaller.
 
 ## Install
 
@@ -72,70 +87,41 @@ Levels are additive. Nothing on this page is needed for the example at the top.
 
 ## Walkthrough
 
-### One client, one stream
+Each step adds one concept. None of them requires rewriting the last.
 
-The most common case, and the entry point. No broadcast, no topics, no
-subscriber registry — none of it is instantiated, so none of it costs anything.
+### Broadcast with topics
 
-```go
-http.Handle("/progress", sse.Handler(func(ctx context.Context, s *sse.Session) error {
-    for _, step := range job.Steps() {
-        if err := s.Send(ctx, step, sse.Name("progress")); err != nil {
-            return err   // the client went away; that is the whole error path
-        }
-    }
-    return nil
-}))
-```
-
-A value goes through the codec (JSON by default). To send something already
-encoded — an HTML fragment for htmx or Turbo, a token from a model — use
-`sse.Text`, `sse.Raw` or `sse.From`. These are the main path, not an escape
-hatch.
-
-The method is not part of the contract. Streaming over `POST` works, which
-matters because MCP does exactly that.
-
-### Add resumption
-
-A log gives the stream a history, and with it the ability to survive a client
-disappearing. The work keeps running while nobody is watching.
+The common case: many subscribers, each wanting a different slice.
 
 ```go
-log := sse.NewMemoryLog(sse.Retention{For: 10 * time.Minute})
-pub := sse.NewPublisher(log)
-
-go func() {
-    for _, step := range job.Steps() {
-        pub.Publish(ctx, step, sse.Name("progress"))
-    }
-}()
-
-http.Handle("/progress", sse.Handler(sse.Follow, sse.WithLog("job", log)))
-```
-
-`sse.Follow` resolves the incoming cursor, declares any gap *before* replaying
-anything, and continues into live delivery. There is no handover between replay
-and live to get wrong: a reader holds a position and advances it.
-
-### Add topics
-
-```go
+log := sse.NewMemoryLog(sse.Retention{For: 5 * time.Minute})
 b := sse.NewBroker("events", log)
 
-http.Handle("/events", b.Handler())   // ?topic=tenant.acme.>&topic=system.notices
+http.Handle("/events", b.Handler())
 
-b.Publish(ctx, sse.MustTopic("tenant.acme.tickets"), ticket, sse.Name("ticket"))
+b.Publish(ctx, sse.MustTopic("org.42.tickets"), ticket, sse.Name("ticket.created"))
+b.Publish(ctx, sse.MustTopic("org.42.builds"),  build,  sse.Name("build.finished"))
+b.Publish(ctx, sse.MustTopic("system.notices"), notice, sse.Name("notice"))
 ```
 
-Filters arrive in the query string, because `EventSource` cannot send headers.
-Wildcards are for subscribing: `*` is one token, `>` is one or more trailing
-ones. Publishing always names one concrete topic, so which subscribers an event
-reaches depends on who is listening and never on how it was addressed.
+A subscriber names what it wants in the query string, because `EventSource`
+cannot send headers:
 
-Several logical streams over one connection is a consequence of this, not a
-feature — which matters, because a browser allows six connections per domain
+```js
+new EventSource('/events?topic=org.42.>&topic=system.notices')
+```
+
+`*` matches one token, `>` matches one or more trailing ones. Wildcards are for
+subscribing; publishing always names one concrete topic, so which subscribers an
+event reaches depends on who is listening and never on how it was addressed.
+
+Several logical streams over one connection is a consequence of this rather than
+a feature — which matters, because a browser allows six connections per domain
 over HTTP/1.1.
+
+A value goes through the codec (JSON by default). To publish something already
+encoded — an HTML fragment for htmx, Datastar or Turbo — use `sse.Text`,
+`sse.Raw` or `sse.From`. Those are a main path, not an escape hatch.
 
 ### Add authorization
 
@@ -161,10 +147,37 @@ http.Handle("/events", b.Handler(sse.WithAuthorizer(authorize)))
 
 A rejection is an ordinary HTTP response with a status code, sent while there is
 still a status to send. That ordering matters more than usual: a client that
-receives any non-200 stops reconnecting permanently.
+receives any non-200 stops reconnecting **permanently**, so refusing a
+reconnection with a 503 during a deploy does not move that client to a healthy
+replica — it kills it. Nothing here ever does that.
 
 A denied topic is *reported*. A stream that simply never carries those events is
 indistinguishable from one where they are quiet, and the client waits forever.
+
+### Add resumption
+
+Retention gives the stream a history, and with it the ability to survive a
+client disappearing — a closed laptop, a tunnel, a deploy.
+
+```go
+log := sse.NewMemoryLog(sse.Retention{For: 10 * time.Minute, Events: 50_000})
+```
+
+That is the change. The client's position travels as the event `id` and comes
+back in `Last-Event-ID`, and the library resolves it, declares any gap **before**
+replaying anything, and continues into live delivery. There is no handover
+between replay and live to get wrong: a reader holds a position and advances it.
+
+When it cannot resume — away longer than the window, a cursor from before a
+restart, a connection that fell too far behind — the client is told which, and
+what it lost:
+
+```js
+es.addEventListener('sse.gap', e => {
+  const { reason, detail } = JSON.parse(e.data)
+  reloadState()   // 'retention' | 'epoch' | 'slow-consumer' | 'unsupported'
+})
+```
 
 ### Add nodes
 
@@ -176,14 +189,47 @@ log, err := redislog.New(ctx, rdb, "sse:events", retention)
 That is the entire diff. Not the authorizer, not the topics, not the handler,
 not the backpressure policy, not a line of application code.
 
-A client that was being served by one replica can reconnect to a different one
-and resume exactly where it stopped, because its cursor names a log and an
-offset rather than anything about the node. Verified with two processes:
-disconnected at step 9 on one node, resumed at step 10 on the other.
+A client being served by one replica can reconnect to a different one and resume
+exactly where it stopped, because its cursor names a log and an offset rather
+than anything about the node. Verified with two processes: disconnected at step
+9 on one node, resumed at step 10 on the other. No sticky sessions.
+
+### Changing a subscription without reconnecting
+
+`EventSource` cannot send anything to the server, so this needs a side channel —
+which needs a session to be addressable. It is, by the id in its connection
+event:
+
+```go
+if s, ok := lifecycle.Session(r.FormValue("session")); ok {
+    s.Resubscribe(sse.MustFilter("org.42.builds"))
+}
+```
+
+The stream does not restart. The subscriber keeps its position, so nothing is
+replayed and nothing is skipped.
+
+### One client, no broadcast
+
+If you do not need fan-out, you do not instantiate it and it costs nothing — no
+registry, no topics, no extra goroutines. Job progress, a build log, a long
+import, an upstream you are proxying:
+
+```go
+http.Handle("/progress", sse.Handler(func(ctx context.Context, s *sse.Session) error {
+    for _, step := range job.Steps() {
+        if err := s.Send(ctx, step, sse.Name("progress")); err != nil {
+            return err   // the client went away; that is the whole error path
+        }
+    }
+    return nil
+}))
+```
+
+The method is not part of the contract — streaming over `POST` works, which
+matters because MCP does exactly that.
 
 Runnable examples for every step are in [`examples/`](examples/).
-
----
 
 ## Backpressure
 

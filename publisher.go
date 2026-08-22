@@ -12,9 +12,12 @@ import (
 //
 // It is the write side of a stream, and it is deliberately separate from the
 // read side: whoever produces events and whoever consumes them need not be the
-// same request, the same goroutine or even the same node. That decoupling is
-// what makes a language-model stream resumable — generation keeps running while
-// the client is away, and reconnecting simply resumes reading.
+// same request, the same goroutine or even the same node.
+//
+// That decoupling is what lets a stream survive its audience. Work carries on
+// while nobody is watching — a background job, a queue worker, another
+// replica — and a client that reconnects picks up from where it stopped rather
+// than from whatever happens to be arriving now.
 //
 // A Publisher is safe for concurrent use.
 type Publisher struct {
