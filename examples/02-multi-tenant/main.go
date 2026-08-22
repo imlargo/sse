@@ -9,9 +9,9 @@
 //
 // Then watch two tenants stay apart:
 //
-//	curl -sN 'localhost:8080/events?topic=tenant.acme.>'
-//	curl -sN 'localhost:8080/events?topic=tenant.*.tickets'
-//	curl -sN 'localhost:8080/events?topic=tenant.acme.tickets&topic=system.notices'
+//	curl -sN 'localhost:8080/events?token=acme&topic=tenant.acme.>'
+//	curl -sN 'localhost:8080/events?token=acme&topic=tenant.globex.>'   # denied, and told so
+//	curl -sN 'localhost:8080/events'                                    # 401
 package main
 
 import (
@@ -24,6 +24,8 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/imlargo/sse"
@@ -44,9 +46,13 @@ func main() {
 
 	mux := http.NewServeMux()
 
-	// One line. Filters come from the query string, because EventSource cannot
-	// send headers.
-	mux.Handle("/events", broker.Handler(sse.WithLifecycle(lc)))
+	// The authorizer is the only place that decides anything. It sees the whole
+	// request before a byte is committed, and what it returns *is* the
+	// subscription.
+	mux.Handle("/events", broker.Handler(
+		sse.WithAuthorizer(authorize),
+		sse.WithLifecycle(lc),
+	))
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -70,6 +76,60 @@ func main() {
 	defer cancel()
 	_ = lc.Shutdown(drainCtx)
 	_ = srv.Shutdown(drainCtx)
+}
+
+// authorize decides who this is and what they may see.
+//
+// Credentials arrive in the query string because EventSource cannot set an
+// Authorization header; a cookie works just as well and both are read here.
+func authorize(r *http.Request) (sse.Grant, error) {
+	token := r.URL.Query().Get("token")
+	if c, err := r.Cookie("tenant"); err == nil {
+		token = c.Value
+	}
+	if token == "" {
+		return sse.Grant{}, sse.Unauthorized("pass ?token=acme, globex or initech")
+	}
+	if !slices.Contains(tenants, token) {
+		return sse.Grant{}, sse.Forbidden("unknown tenant " + token)
+	}
+
+	// What the client asked for, narrowed to what it may actually have.
+	// Anything refused is reported rather than dropped: a topic that silently
+	// never produces events is indistinguishable from one that is merely
+	// quiet, and the client would wait forever.
+	asked, err := sse.FiltersFromQuery(r, sse.TopicQueryParam)
+	if err != nil {
+		return sse.Grant{}, sse.BadRequest(err.Error())
+	}
+
+	mine := sse.MustFilter("tenant." + token + ".>")
+	notices := sse.MustFilter("system.notices")
+
+	granted := []sse.Filter{}
+	var denied []sse.Denial
+	if len(asked) == 0 {
+		granted = append(granted, mine, notices)
+	}
+	for _, f := range asked {
+		switch {
+		case strings.HasPrefix(f.String(), "tenant."+token+"."), f.String() == "system.notices":
+			granted = append(granted, f)
+		default:
+			denied = append(denied, sse.Denial{Topic: f.String(), Reason: "not-your-tenant"})
+		}
+	}
+
+	return sse.Grant{
+		Identity: token,
+		Filters:  granted,
+		Denied:   denied,
+		// A credential that expires mid-stream is a non-event: the session
+		// ends, the client reconnects by itself with a fresh one, and resumes
+		// from its cursor.
+		Deadline:   time.Now().Add(5 * time.Minute),
+		Attributes: map[string]string{"tenant": token},
+	}, nil
 }
 
 // produce stands in for the application. It publishes and has no idea who, if
@@ -120,14 +180,16 @@ const page = `<!doctype html>
           padding: .5rem .7rem; height: 16rem; overflow: auto; margin-top: .4rem; }
 </style>
 <h1>Three subscribers, one broker</h1>
-<p>Each opens its own connection with a different filter. Publishing names one
-concrete topic; who receives it is decided by who is listening.</p>
+<p>Each opens its own connection with its own credentials. The third asks for
+another tenant's events and is told, in the connection event, exactly what was
+refused — rather than receiving a stream that is quietly missing them.</p>
 <div class="cols" id="cols"></div>
 <script>
   const subs = [
-    { title: 'Acme, everything',      filter: 'tenant.acme.>' },
-    { title: 'Tickets, all tenants',  filter: 'tenant.*.tickets' },
-    { title: 'Acme tickets + notices', filter: ['tenant.acme.tickets', 'system.notices'] },
+    { title: 'Acme, everything',       token: 'acme',   filter: 'tenant.acme.>' },
+    { title: 'Globex, everything',     token: 'globex', filter: 'tenant.globex.>' },
+    { title: 'Acme asking for Globex', token: 'acme',
+      filter: ['tenant.acme.tickets', 'tenant.globex.>', 'system.notices'] },
   ];
 
   for (const s of subs) {
@@ -140,11 +202,15 @@ concrete topic; who receives it is decided by who is listening.</p>
 
     const feed = col.querySelector('.feed');
     const qs = filters.map(f => 'topic=' + encodeURIComponent(f)).join('&');
-    const es = new EventSource('/events?' + qs);
+    const es = new EventSource('/events?token=' + s.token + '&' + qs);
 
     es.addEventListener('sse.open', e => {
       const o = JSON.parse(e.data);
-      feed.textContent = 'resumable: ' + o.resumable + '  ·  ' + o.delivery + '\n';
+      feed.textContent = 'identity: ' + o.identity + '  ·  ' + o.delivery + '\n';
+      // Anything refused is stated, not silently absent.
+      for (const d of o.denied || []) {
+        feed.textContent += 'DENIED ' + d.topic + ' (' + d.reason + ')\n';
+      }
     });
     es.addEventListener('sse.gap', e => {
       feed.insertAdjacentText('afterbegin', 'GAP ' + e.data + '\n');

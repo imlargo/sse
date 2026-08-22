@@ -42,8 +42,9 @@ Arquitectura cerrada (`06`) y fases 0 a 2 del plan (`07`) implementadas.
 | 2 · Sesión y transporte | hecha — nivel 0 completo, con ejemplo ejecutable |
 | 3 · El Log | hecha — offsets, epoch, retención, cursor, huecos declarados |
 | 4 · Broker: topics y contrapresión | hecha — filtros jerárquicos, cinco políticas, checkpoint de cursor |
-| 5 · Autorización y observabilidad | siguiente |
-| 6-8 | pendientes |
+| 5 · Autorización y observabilidad | hecha — Authorizer/Grant, denegación declarada, métricas sin dependencias |
+| 6 · Distribución (Redis, NATS) | siguiente |
+| 7-8 | pendientes |
 
 ```go
 http.Handle("/chat", sse.Handler(func(ctx context.Context, s *sse.Session) error {
@@ -76,6 +77,24 @@ filtros:
 b := sse.NewBroker("events", log)
 http.Handle("/events", b.Handler())          // ?topic=tenant.acme.>
 b.Publish(ctx, sse.MustTopic("tenant.acme.tickets"), ticket)
+```
+
+Con autorización — el `Authorizer` ve la petición entera antes de comprometer
+un solo byte, y lo que devuelve *es* la suscripción:
+
+```go
+func authorize(r *http.Request) (sse.Grant, error) {
+    user, ok := session(r)                       // cookie o query: EventSource no manda cabeceras
+    if !ok {
+        return sse.Grant{}, sse.Unauthorized("sign in to subscribe")
+    }
+    return sse.Grant{
+        Identity: user.ID,
+        Filters:  []sse.Filter{sse.MustFilter("tenant." + user.Tenant + ".>")},
+        Denied:   refused,                       // se le dice, no se le oculta
+        Deadline: user.TokenExpiry,              // caduca -> reconecta con credenciales frescas
+    }, nil
+}
 ```
 
 `go run ./examples/02-multi-tenant` y `go run ./examples/03-dashboard`.

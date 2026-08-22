@@ -62,7 +62,7 @@ frágil. Unificados, salen gratis siete cosas:
 | Coste por suscriptor O(1) en memoria, no O(profundidad de cola) | RF-D4, RNF-2 |
 | Cero asignaciones por evento entregado: el frame es un `[]byte` inmutable compartido | RNF-3 |
 | **La transición de historial a vivo no existe**: el offset simplemente avanza. No hay carrera posible por construcción | RF-C6 |
-| "Descartar el más antiguo" pasa de ser pérdida de datos a ser **recuperable**: avanzar offset + emitir hueco | RF-D6 |
+| "Descartar el más antiguo" pasa de ser pérdida **silenciosa** a ser pérdida **declarada**, con el rango exacto y un motivo distinguible | RF-D6 |
 | Detección de hueco exacta y barata: offset pedido < offset más antiguo retenido | RF-C4 |
 
 RF-C6 merece un subrayado: **toda librería SSE que reproduce historial y luego
@@ -448,8 +448,19 @@ permite probar la conformidad sin levantar un servidor.
 - **Por defecto `DropOldest`.** No `Block` (bloquear al publicador es el bug de
   `r3labs/sse`), no `Disconnect` (demasiado agresivo por defecto), y **no
   elección obligatoria** — obligar a decidir en el camino feliz viola la
-  prioridad #1. `DropOldest` degrada de forma predecible y, con retención
-  activada, es **recuperable**.
+  prioridad #1. `DropOldest` degrada de forma predecible y **declara** lo que
+  perdió.
+
+  **Corrección tras implementarlo.** Un borrador anterior de este documento
+  decía que en el modelo de log el descarte pasa de ser pérdida de datos a ser
+  *recuperable*. Es una sobrepromesa y se detectó al escribir el código: los
+  eventos descartados por contrapresión **están perdidos para esa conexión**.
+  El cursor que el cliente guarda es el del último evento que recibió, así que
+  al reconectar reanuda después del descarte. Lo que la librería sí hace —y es
+  lo que ninguna otra hace— es decir **exactamente cuáles** se perdieron, con
+  un motivo (`slow-consumer`) distinguible del vencimiento de retención
+  (`retention`), y decirle al cliente que recargue estado. Mismo contrato que
+  un hueco de retención. Un fallo declarado es aceptable; el silencioso no.
 - **Clave de fusión explícita**, `sse.WithKey("entidad:42")`. Ni reflexión
   sobre el payload, ni derivada del topic. Cero magia.
 - **Se fija al suscribir, inmutable durante la sesión** (RF-E6). Cambiarla es una
