@@ -40,8 +40,9 @@ Arquitectura cerrada (`06`) y fases 0 a 2 del plan (`07`) implementadas.
 | 0 · Fundamentos | hecha — módulo sin dependencias verificado en CI, detección de fugas en toda la suite |
 | 1 · Capa de cable (`wire/`) | hecha — 32 vectores de conformidad, fuzzing, **0 asignaciones por evento** |
 | 2 · Sesión y transporte | hecha — nivel 0 completo, con ejemplo ejecutable |
-| 3 · El Log | siguiente |
-| 4-8 | pendientes |
+| 3 · El Log | hecha — offsets, epoch, retención, cursor, huecos declarados |
+| 4 · Broker: topics y contrapresión | siguiente |
+| 5-8 | pendientes |
 
 ```go
 http.Handle("/chat", sse.Handler(func(ctx context.Context, s *sse.Session) error {
@@ -55,6 +56,20 @@ http.Handle("/chat", sse.Handler(func(ctx context.Context, s *sse.Session) error
 ```
 
 Sin cabeceras, sin flush, sin heartbeat, sin deadlines: `go run ./examples/00-llm-proxy`.
+
+Con reanudación, el caso estrella — el trabajo sigue corriendo mientras el cliente
+no está, y al volver continúa donde se quedó:
+
+```go
+log := sse.NewMemoryLog(sse.Retention{For: 10 * time.Minute})
+http.Handle("/job", sse.Handler(sse.Follow, sse.WithLog("job", log)))
+```
+
+`go run ./examples/01-resumable-job`. Verificado sobre socket real: cliente cortado
+en el paso 4, reconexión con un cursor de 27 caracteres, primer evento el paso 5.
+
+Medido: **0 asignaciones** por evento codificado, y el coste de difusión es
+**idéntico con 1 y con 1000 suscriptores** (1 alloc/op en ambos).
 
 Especificación verificada contra la fuente normativa (WHATWG HTML §9.2); las
 correcciones a `02` y `04` están anotadas en `06`.
