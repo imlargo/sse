@@ -310,7 +310,7 @@ Other measured numbers:
 | Fan-out | **1 alloc/op with 1 subscriber and with 1,000** |
 | Resumption cursor, single log | **31 bytes** |
 | Memory | ~50 KB RSS per connection, of which this library is ~4 KB — the rest is goroutines and `net/http` buffers |
-| Sustained | 15,000 connections, a third throttled: 2 goroutines per session, heap settles, nothing dropped |
+| Sustained | 15,000 sessions over the in-memory transport, a third throttled: 2 goroutines per session, heap settles, nothing dropped. This isolates the library's own cost; a real socket adds `net/http`'s buffers and its own limits. |
 
 Reproduce with `make bench` and `make soak`.
 
