@@ -44,6 +44,11 @@ type Session struct {
 	resumeGap *Gap
 	resumable bool
 
+	// checkpoint carries the cursor past events this subscriber filtered out,
+	// so the keep-alive can advance the client's position without delivering
+	// anything. Written by the follow loop, read by the writer goroutine.
+	checkpoint atomic.Pointer[string]
+
 	// following guards against mixing two sources of truth on one session:
 	// while a log is being streamed, ids come from the log, and an event sent
 	// directly would carry none and be silently unrecoverable on resume.
@@ -69,6 +74,7 @@ type SendOption func(*sendOpts)
 type sendOpts struct {
 	name      string
 	key       string
+	topic     Topic
 	ephemeral bool
 }
 
@@ -263,7 +269,14 @@ func (s *Session) pump() {
 			// The heartbeat is also the liveness probe. A peer that has gone
 			// away is discovered here, in every environment, whether or not the
 			// request context ever fires.
-			if err := s.writeBytes(keepAliveLine); err != nil {
+			//
+			// It doubles as a cursor checkpoint. The specification commits an
+			// id to the client before deciding whether the block carries data,
+			// so an id with no data advances the client's resumption position
+			// without dispatching an event. That is what stops a subscriber
+			// whose filter matches nothing from resuming far in the past and
+			// rescanning everything it already skipped.
+			if err := s.writeKeepAlive(); err != nil {
 				s.fail(err)
 				return
 			}
@@ -387,6 +400,32 @@ func jitterDelay(base time.Duration, frac float64) time.Duration {
 		d = time.Millisecond
 	}
 	return d
+}
+
+// writeKeepAlive emits a cursor checkpoint if the position has moved past what
+// the client has been told, and a bare comment otherwise.
+func (s *Session) writeKeepAlive() error {
+	cp := s.checkpoint.Load()
+	if cp == nil {
+		return s.writeBytes(keepAliveLine)
+	}
+	s.checkpoint.Store(nil)
+
+	id, err := wire.NewID(*cp)
+	if err != nil {
+		return s.writeBytes(keepAliveLine)
+	}
+	buf := getBuf()
+	defer putBuf(buf)
+	out, err := wire.AppendIDLine((*buf)[:0], id)
+	if err != nil {
+		return err
+	}
+	// A blank line closes the block. With no data field the client suppresses
+	// the event but still commits the id.
+	out = append(out, '\n')
+	*buf = out
+	return s.writeBytes(out)
 }
 
 // keepAliveLine is the cheapest thing that can go on the wire: a bare comment.

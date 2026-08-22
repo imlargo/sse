@@ -43,6 +43,24 @@ type config struct {
 	start        StartPosition
 }
 
+// inherited returns the broker's configuration as options, so a handler built
+// from it starts from the same settings.
+func (c *config) inherited() []Option {
+	return []Option{
+		WithKeepAlive(c.keepAlive),
+		WithWriteTimeout(c.writeTimeout),
+		WithRetry(c.retry),
+		WithRetryJitter(c.retryJitter),
+		WithMaxEventSize(c.maxEventSize),
+		WithBackpressure(c.backpressure),
+		WithReservedPrefix(c.prefix),
+		WithCodec(c.codec),
+		WithLogger(c.logger),
+		WithStart(c.start),
+		WithFullDuplex(c.fullDuplex),
+	}
+}
+
 // A StartPosition says where a client with no resolvable cursor begins.
 type StartPosition int
 

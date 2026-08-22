@@ -48,6 +48,12 @@ func (s *Session) Resumable() bool { return s.resumable }
 // application's. There is no transition to get wrong: a reader holds a position
 // and advances it, so replay is live delivery from an older offset.
 func (s *Session) Follow(ctx context.Context) error {
+	return s.follow(ctx, nil)
+}
+
+// follow streams the log, delivering only entries the filters select. A nil
+// filter list delivers everything, which is the single-log case with no topics.
+func (s *Session) follow(ctx context.Context, filters []Filter) error {
 	if s.log == nil {
 		return fmt.Errorf("sse: Follow: no log configured; pass sse.WithLog to the handler")
 	}
@@ -116,10 +122,37 @@ func (s *Session) Follow(ctx context.Context) error {
 			}
 		}
 
+		if !selects(filters, entry.Frame.Topic) {
+			// Not for this subscriber. Its position still advances, and the
+			// keep-alive carries that forward as a checkpoint so it does not
+			// resume far in the past and rescan everything it skipped.
+			s.cursor = s.cursor.With(CursorEntry{Log: s.logID, Epoch: s.epoch, Offset: entry.Offset})
+			if s.resumable {
+				cp := s.cursor.String()
+				s.checkpoint.Store(&cp)
+			}
+			continue
+		}
+
 		if err := s.writeEntry(ctx, entry); err != nil {
 			return err
 		}
 	}
+}
+
+// selects reports whether any filter matches the topic. No filters means no
+// filtering; an event with no topic is not addressed and reaches everyone.
+func selects(filters []Filter, topic string) bool {
+	if len(filters) == 0 || topic == "" {
+		return true
+	}
+	t := Topic{s: topic}
+	for _, f := range filters {
+		if f.Matches(t) {
+			return true
+		}
+	}
+	return false
 }
 
 // writeEntry sends one stored frame, prefixed with this client's position.
@@ -129,6 +162,9 @@ func (s *Session) Follow(ctx context.Context) error {
 func (s *Session) writeEntry(ctx context.Context, e Entry) error {
 	cursor := s.cursor.With(CursorEntry{Log: s.logID, Epoch: s.epoch, Offset: e.Offset})
 	s.cursor = cursor
+	// The id about to be written carries the position, so any pending
+	// checkpoint is now redundant.
+	s.checkpoint.Store(nil)
 
 	id := wire.NoID()
 	if s.resumable {

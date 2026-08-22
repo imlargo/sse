@@ -74,6 +74,11 @@ type Frame struct {
 	// id field. It must be treated as immutable once appended.
 	Body []byte
 
+	// Topic is the address the event was published to. Subscribers select on
+	// it. Empty means the event is not addressed, which is the single-log case
+	// with no topics at all.
+	Topic string
+
 	// Name is the event type, kept for observability and for retention
 	// policies that distinguish event kinds.
 	Name string
@@ -93,7 +98,7 @@ type Frame struct {
 }
 
 // Size reports the frame's contribution to a log's byte budget.
-func (f Frame) Size() int { return len(f.Body) + len(f.Name) + len(f.Key) }
+func (f Frame) Size() int { return len(f.Body) + len(f.Topic) + len(f.Name) + len(f.Key) }
 
 // LogInfo describes a log's current state.
 type LogInfo struct {
