@@ -1,0 +1,443 @@
+{
+  "$comment": "Conformance vectors for text/event-stream. Generated from wire/conformance_test.go; do not edit by hand.",
+  "source": "https://html.spec.whatwg.org/multipage/server-sent-events.html",
+  "vectors": [
+    {
+      "name": "terminator/lf",
+      "why": "A lone line feed terminates a line.",
+      "input": "data: a\n\n",
+      "want": [
+        {
+          "type": "message",
+          "data": "a",
+          "lastEventId": ""
+        }
+      ],
+      "wantLastEventId": "",
+      "wantRetryMs": 0
+    },
+    {
+      "name": "terminator/crlf",
+      "why": "A CRLF pair terminates a line and counts as one terminator.",
+      "input": "data: a\r\n\r\n",
+      "want": [
+        {
+          "type": "message",
+          "data": "a",
+          "lastEventId": ""
+        }
+      ],
+      "wantLastEventId": "",
+      "wantRetryMs": 0
+    },
+    {
+      "name": "terminator/cr",
+      "why": "A lone carriage return terminates a line. Libraries that split only on LF are incorrect here.",
+      "input": "data: a\r\r",
+      "want": [
+        {
+          "type": "message",
+          "data": "a",
+          "lastEventId": ""
+        }
+      ],
+      "wantLastEventId": "",
+      "wantRetryMs": 0
+    },
+    {
+      "name": "terminator/mixed",
+      "why": "Terminators may be mixed freely within one stream.",
+      "input": "data: a\r\ndata: b\rdata: c\n\n",
+      "want": [
+        {
+          "type": "message",
+          "data": "a\nb\nc",
+          "lastEventId": ""
+        }
+      ],
+      "wantLastEventId": "",
+      "wantRetryMs": 0
+    },
+    {
+      "name": "bom/stripped",
+      "why": "UTF-8 decoding strips one leading byte order mark.",
+      "input": "﻿data: a\n\n",
+      "want": [
+        {
+          "type": "message",
+          "data": "a",
+          "lastEventId": ""
+        }
+      ],
+      "wantLastEventId": "",
+      "wantRetryMs": 0
+    },
+    {
+      "name": "bom/only-one",
+      "why": "Only the first byte order mark is stripped; a second one is part of the field name and makes it unknown.",
+      "input": "﻿﻿data: a\n\n",
+      "want": null,
+      "wantLastEventId": "",
+      "wantRetryMs": 0
+    },
+    {
+      "name": "space/absent",
+      "why": "No space after the colon means no space is removed.",
+      "input": "data:a\n\n",
+      "want": [
+        {
+          "type": "message",
+          "data": "a",
+          "lastEventId": ""
+        }
+      ],
+      "wantLastEventId": "",
+      "wantRetryMs": 0
+    },
+    {
+      "name": "space/one",
+      "why": "Exactly one leading space is removed.",
+      "input": "data: a\n\n",
+      "want": [
+        {
+          "type": "message",
+          "data": "a",
+          "lastEventId": ""
+        }
+      ],
+      "wantLastEventId": "",
+      "wantRetryMs": 0
+    },
+    {
+      "name": "space/two",
+      "why": "Only one space is removed, so the second survives. This is why an encoder must always write the space: doing it conditionally eats a character from any payload starting with one.",
+      "input": "data:  a\n\n",
+      "want": [
+        {
+          "type": "message",
+          "data": " a",
+          "lastEventId": ""
+        }
+      ],
+      "wantLastEventId": "",
+      "wantRetryMs": 0
+    },
+    {
+      "name": "data/empty-value-dispatches",
+      "why": "A data field with an empty value leaves a line feed in the buffer, so the buffer is not empty and the event IS dispatched with empty data. Only a block with no data field at all is suppressed.",
+      "input": "data:\n\n",
+      "want": [
+        {
+          "type": "message",
+          "data": "",
+          "lastEventId": ""
+        }
+      ],
+      "wantLastEventId": "",
+      "wantRetryMs": 0
+    },
+    {
+      "name": "data/absent-suppresses",
+      "why": "A block carrying only an event field has an empty data buffer and is suppressed.",
+      "input": "event: ping\n\n",
+      "want": null,
+      "wantLastEventId": "",
+      "wantRetryMs": 0
+    },
+    {
+      "name": "data/multiline",
+      "why": "Repeated data fields are rejoined with line feeds.",
+      "input": "data: a\ndata: b\n\n",
+      "want": [
+        {
+          "type": "message",
+          "data": "a\nb",
+          "lastEventId": ""
+        }
+      ],
+      "wantLastEventId": "",
+      "wantRetryMs": 0
+    },
+    {
+      "name": "data/trailing-blank-line-preserved",
+      "why": "Only the final line feed is stripped, so a payload can end in one.",
+      "input": "data: a\ndata:\n\n",
+      "want": [
+        {
+          "type": "message",
+          "data": "a\n",
+          "lastEventId": ""
+        }
+      ],
+      "wantLastEventId": "",
+      "wantRetryMs": 0
+    },
+    {
+      "name": "data/no-colon-is-empty-value",
+      "why": "A line with no colon is the field name with an empty value, so a bare 'data' line appends an empty line.",
+      "input": "data\n\n",
+      "want": [
+        {
+          "type": "message",
+          "data": "",
+          "lastEventId": ""
+        }
+      ],
+      "wantLastEventId": "",
+      "wantRetryMs": 0
+    },
+    {
+      "name": "id/without-data-advances-cursor",
+      "why": "The last event ID is committed before the empty-data check, so an id-only block advances the client's cursor while dispatching nothing. This is the primitive that makes out-of-band checkpointing free.",
+      "input": "id: 42\n\n",
+      "want": null,
+      "wantLastEventId": "42",
+      "wantRetryMs": 0
+    },
+    {
+      "name": "id/persists-across-events",
+      "why": "The id buffer is never reset by a dispatch, so a later event with no id inherits the previous one.",
+      "input": "data: a\nid: 1\n\ndata: b\n\n",
+      "want": [
+        {
+          "type": "message",
+          "data": "a",
+          "lastEventId": "1"
+        },
+        {
+          "type": "message",
+          "data": "b",
+          "lastEventId": "1"
+        }
+      ],
+      "wantLastEventId": "1",
+      "wantRetryMs": 0
+    },
+    {
+      "name": "id/empty-resets-cursor",
+      "why": "An empty id field sets the cursor to the empty string, so the client sends no Last-Event-ID on its next reconnection. It is the specification's own way to say a stored position is no longer resolvable.",
+      "input": "data: a\nid: 1\n\ndata: b\nid\n\n",
+      "want": [
+        {
+          "type": "message",
+          "data": "a",
+          "lastEventId": "1"
+        },
+        {
+          "type": "message",
+          "data": "b",
+          "lastEventId": ""
+        }
+      ],
+      "wantLastEventId": "",
+      "wantRetryMs": 0
+    },
+    {
+      "name": "id/nul-ignored",
+      "why": "An id containing NUL makes the client ignore the whole field, leaving the cursor where it was.",
+      "input": "id: 1\n\ndata: a\nid: x\u0000y\n\n",
+      "want": [
+        {
+          "type": "message",
+          "data": "a",
+          "lastEventId": "1"
+        }
+      ],
+      "wantLastEventId": "1",
+      "wantRetryMs": 0
+    },
+    {
+      "name": "retry/digits",
+      "why": "A value of only ASCII digits sets the reconnection time in milliseconds.",
+      "input": "retry: 5000\ndata: a\n\n",
+      "want": [
+        {
+          "type": "message",
+          "data": "a",
+          "lastEventId": ""
+        }
+      ],
+      "wantLastEventId": "",
+      "wantRetryMs": 5000
+    },
+    {
+      "name": "retry/non-numeric-ignored",
+      "why": "Anything that is not only ASCII digits is ignored.",
+      "input": "retry: soon\ndata: a\n\n",
+      "want": [
+        {
+          "type": "message",
+          "data": "a",
+          "lastEventId": ""
+        }
+      ],
+      "wantLastEventId": "",
+      "wantRetryMs": 0
+    },
+    {
+      "name": "retry/fractional-ignored",
+      "why": "A decimal point is not an ASCII digit, so the field is ignored entirely rather than truncated.",
+      "input": "retry: 1.5\ndata: a\n\n",
+      "want": [
+        {
+          "type": "message",
+          "data": "a",
+          "lastEventId": ""
+        }
+      ],
+      "wantLastEventId": "",
+      "wantRetryMs": 0
+    },
+    {
+      "name": "retry/signed-ignored",
+      "why": "A sign is not an ASCII digit.",
+      "input": "retry: -1\ndata: a\n\n",
+      "want": [
+        {
+          "type": "message",
+          "data": "a",
+          "lastEventId": ""
+        }
+      ],
+      "wantLastEventId": "",
+      "wantRetryMs": 0
+    },
+    {
+      "name": "field/unknown-ignored",
+      "why": "Unknown field names are ignored.",
+      "input": "unknown: x\ndata: a\n\n",
+      "want": [
+        {
+          "type": "message",
+          "data": "a",
+          "lastEventId": ""
+        }
+      ],
+      "wantLastEventId": "",
+      "wantRetryMs": 0
+    },
+    {
+      "name": "field/case-sensitive",
+      "why": "Field names are compared literally, with no case folding, so 'Data' is an unknown field.",
+      "input": "Data: ignored\ndata: a\n\n",
+      "want": [
+        {
+          "type": "message",
+          "data": "a",
+          "lastEventId": ""
+        }
+      ],
+      "wantLastEventId": "",
+      "wantRetryMs": 0
+    },
+    {
+      "name": "comment/ignored",
+      "why": "A line starting with a colon is a comment.",
+      "input": ": keep-alive\ndata: a\n\n",
+      "want": [
+        {
+          "type": "message",
+          "data": "a",
+          "lastEventId": ""
+        }
+      ],
+      "wantLastEventId": "",
+      "wantRetryMs": 0
+    },
+    {
+      "name": "comment/only-dispatches-nothing",
+      "why": "A block of only comments has an empty data buffer and is suppressed. This is what makes a comment a zero-cost keep-alive.",
+      "input": ": keep-alive\n\n",
+      "want": null,
+      "wantLastEventId": "",
+      "wantRetryMs": 0
+    },
+    {
+      "name": "event/named",
+      "why": "An event field sets the dispatched type.",
+      "input": "event: token\ndata: a\n\n",
+      "want": [
+        {
+          "type": "token",
+          "data": "a",
+          "lastEventId": ""
+        }
+      ],
+      "wantLastEventId": "",
+      "wantRetryMs": 0
+    },
+    {
+      "name": "event/resets-between-blocks",
+      "why": "The event type buffer is reset on dispatch, so a later block with no event field is a plain message.",
+      "input": "event: token\ndata: a\n\ndata: b\n\n",
+      "want": [
+        {
+          "type": "token",
+          "data": "a",
+          "lastEventId": ""
+        },
+        {
+          "type": "message",
+          "data": "b",
+          "lastEventId": ""
+        }
+      ],
+      "wantLastEventId": "",
+      "wantRetryMs": 0
+    },
+    {
+      "name": "event/reset-even-when-suppressed",
+      "why": "The event type buffer is also cleared when a block is suppressed for carrying no data.",
+      "input": "event: token\n\ndata: b\n\n",
+      "want": [
+        {
+          "type": "message",
+          "data": "b",
+          "lastEventId": ""
+        }
+      ],
+      "wantLastEventId": "",
+      "wantRetryMs": 0
+    },
+    {
+      "name": "eof/incomplete-block-discarded",
+      "why": "Dispatch happens on a blank line, and end of file is not one. A final block without its blank line is dropped, which is why a graceful shutdown must close the last block.",
+      "input": "data: a\n",
+      "want": null,
+      "wantLastEventId": "",
+      "wantRetryMs": 0
+    },
+    {
+      "name": "eof/partial-line-discarded",
+      "why": "A line with no terminator at end of file is discarded.",
+      "input": "data: a",
+      "want": null,
+      "wantLastEventId": "",
+      "wantRetryMs": 0
+    },
+    {
+      "name": "spec/four-block-example",
+      "why": "The four-block example from the WHATWG specification, end to end: a comment that fires nothing, an event that sets the cursor to 1, an event that resets the cursor, and an event whose payload keeps a leading space.",
+      "input": ": test stream\n\ndata: first event\nid: 1\n\ndata:second event\nid\n\ndata:  third event\n\n",
+      "want": [
+        {
+          "type": "message",
+          "data": "first event",
+          "lastEventId": "1"
+        },
+        {
+          "type": "message",
+          "data": "second event",
+          "lastEventId": ""
+        },
+        {
+          "type": "message",
+          "data": " third event",
+          "lastEventId": ""
+        }
+      ],
+      "wantLastEventId": "",
+      "wantRetryMs": 0
+    }
+  ]
+}
