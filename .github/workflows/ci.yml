@@ -97,6 +97,12 @@ jobs:
 
   staticcheck:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Every module. The submodules are where third-party dependencies live
+        # and are exactly where a finding is easiest to miss.
+        module: ['.', 'logs/redis', 'compat', 'examples/04-distributed']
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -106,3 +112,4 @@ jobs:
         with:
           version: latest
           install-go: false
+          working-directory: ${{ matrix.module }}

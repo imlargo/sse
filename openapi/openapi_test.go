@@ -172,6 +172,8 @@ func TestSchemaDerivation(t *testing.T) {
 	if _, ok := props["Secret"]; ok {
 		t.Error(`a field tagged json:"-" leaked into the schema`)
 	}
+	// The field exists precisely so this assertion has something to catch.
+	_ = Ticket{internal: "never serialised"}
 	if _, ok := props["internal"]; ok {
 		t.Error("an unexported field leaked into the schema")
 	}
