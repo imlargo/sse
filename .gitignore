@@ -1,0 +1,19 @@
+# Binaries and build output
+*.exe
+*.out
+*.test
+/bin/
+/dist/
+
+# Coverage
+*.cover
+coverage.out
+coverage.html
+
+# Fuzzing corpus generated locally (seed corpus lives in testdata/)
+/**/testdata/fuzz/
+
+# Editors / OS
+.DS_Store
+.idea/
+.vscode/
