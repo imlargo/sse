@@ -14,8 +14,6 @@ import (
 	"github.com/imlargo/sse/ssetest"
 )
 
-func req() *httptest.ResponseRecorder { return httptest.NewRecorder() }
-
 // serveOn runs fn over an in-memory transport and returns when the stream ends.
 func serveOn(t *testing.T, c *ssetest.Conn, fn sse.StreamFunc, opts ...sse.Option) error {
 	t.Helper()

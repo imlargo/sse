@@ -44,8 +44,8 @@ Arquitectura cerrada (`06`) y fases 0 a 2 del plan (`07`) implementadas.
 | 4 · Broker: topics y contrapresión | hecha — filtros jerárquicos, cinco políticas, checkpoint de cursor |
 | 5 · Autorización y observabilidad | hecha — Authorizer/Grant, denegación declarada, métricas sin dependencias |
 | 6 · Distribución | hecha — Redis Streams, reanudación entre nodos verificada |
-| 7 · Catálogo y OpenAPI 3.2 | siguiente |
-| 8 · Adaptadores, docs y congelación | pendiente |
+| 7 · Catálogo y OpenAPI 3.2 | hecha — sin tipos TS (descartado por el autor) |
+| 8 · Adaptadores, docs y congelación | parcial, ver abajo |
 
 ```go
 http.Handle("/chat", sse.Handler(func(ctx context.Context, s *sse.Session) error {
@@ -113,6 +113,22 @@ reconecta contra el **nodo B**, que nunca lo había visto, y continúa en el seq
 sin huecos. Sin sesiones pegajosas: el cursor nombra un log y un offset, no un
 nodo. `go run ./examples/04-distributed`.
 
+Declarando lo que emite el stream, una vez, y derivando de ahí el evento de
+capacidades y el documento de API:
+
+```go
+var TicketCreated = sse.Declare[Ticket]("ticket.created").OnTopic("tenant.*.tickets")
+
+b := sse.NewBroker("events", log, sse.WithCatalog(sse.NewCatalog(TicketCreated)))
+TicketCreated.Publish(ctx, b, topic, ticket)   // no compila con otro tipo
+```
+
+`openapi.Generate` produce OpenAPI **3.2** con `itemSchema` y un `oneOf`
+discriminado por `event: {const: …}` — el patrón que la propia especificación
+publica para un stream con varios tipos de evento. Incluye los eventos
+reservados de la librería, porque un cliente que no sabe qué es `sse.gap` lo
+ignora justo cuando más lo necesita.
+
 ### Medido
 
 | | |
@@ -124,3 +140,47 @@ nodo. `go run ./examples/04-distributed`.
 
 Especificación verificada contra la fuente normativa (WHATWG HTML §9.2); las
 correcciones a `02` y `04` están anotadas en `06`.
+
+
+---
+
+## Frameworks
+
+**Gin y Echo no necesitan adaptador.** Ambos envuelven `http.ResponseWriter` e
+implementan `Unwrap() http.ResponseWriter`, así que `http.ResponseController`
+alcanza el writer real y tanto el vaciado como los deadlines de escritura
+funcionan tal cual:
+
+```go
+r.GET("/events", gin.WrapH(sse.Handler(stream)))          // Gin 1.12
+e.GET("/events", echo.WrapHandler(sse.Handler(stream)))   // Echo 4.15
+```
+
+Verificado en CI (`compat/`, módulo aparte para que sus dependencias no entren
+en el grafo del núcleo). Si algún día dejan de exponer el writer, el test falla
+y la librería rechaza el stream con un error que nombra el tipo culpable en vez
+de abrir un stream que nunca se puede vaciar.
+
+Pendiente: **Fiber**. No va sobre `net/http` y su contexto de petición no señala
+la desconexión del cliente, que es el hueco documentado del ecosistema. Necesita
+una implementación propia de `Transport`.
+
+## No-objetivos
+
+Declarados en voz alta, porque poner los límites por delante evita expectativas
+mal puestas:
+
+- **Comunicación bidireccional de baja latencia.** Juegos, edición colaborativa
+  con CRDT, voz o vídeo. Eso es WebSocket o WebRTC.
+- **Transporte de datos binarios de volumen.** El cable es texto UTF-8;
+  codificar en base64 cuesta ~33% de sobrecarga.
+- **Garantías transaccionales o colas durables por consumidor.** Con historial
+  esto ofrece entrega **al menos una vez dentro de una ventana de retención**,
+  no durabilidad. Quien necesite lo segundo necesita una cola, y SSE será solo
+  el último tramo de entrega.
+- **Miles de mensajes por segundo por conexión individual.** El agrupamiento y
+  la fusión ayudan, pero la sobrecarga del formato de texto pesa.
+- **Ser un servidor autónomo.** Para eso están Centrifugo, AnyCable o el hub de
+  Mercure. Esto es una librería para embeber.
+- **Cliente Go.** Fuera del alcance de la v1. El decodificador de `wire/` **no**
+  es un cliente: no tiene reconexión, ni backoff, ni gestión de cursor.

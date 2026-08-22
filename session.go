@@ -138,6 +138,9 @@ func (s *Session) Send(ctx context.Context, v any, opts ...SendOption) error {
 			ErrReservedName, o.name, s.cfg.prefix)
 	}
 
+	if err := s.cfg.catalog.check(o.name); err != nil {
+		return err
+	}
 	if s.following.Load() {
 		return ErrFollowing
 	}

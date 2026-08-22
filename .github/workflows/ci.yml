@@ -82,8 +82,27 @@ jobs:
           SSE_REDIS_ADDR: 127.0.0.1:6379
         run: go test -race -count=1 ./...
 
+  # Third-party frameworks, in their own module so their dependencies never
+  # enter the core's graph.
+  compat:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+      - name: Gin and Echo compatibility
+        working-directory: compat
+        run: go test -race -count=1 ./...
+
   staticcheck:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Every module. The submodules are where third-party dependencies live
+        # and are exactly where a finding is easiest to miss.
+        module: ['.', 'logs/redis', 'compat', 'examples/04-distributed']
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -93,3 +112,4 @@ jobs:
         with:
           version: latest
           install-go: false
+          working-directory: ${{ matrix.module }}

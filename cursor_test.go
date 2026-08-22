@@ -167,14 +167,38 @@ func TestCursorWithReplacesPerLog(t *testing.T) {
 	}
 }
 
-// LogID is derived from the name, so it is the same on every node and after
-// every restart with no coordination.
-func TestLogIDIsStableAndDerived(t *testing.T) {
-	if sse.NewLogID("events") != sse.NewLogID("events") {
-		t.Error("NewLogID is not deterministic")
+// A log's identifier is derived from its name by hashing rather than assigned,
+// which is what lets nodes agree on it with no coordination.
+//
+// The values are pinned rather than merely compared to themselves. Deriving
+// them the same way twice in one process proves nothing: the requirement is
+// that a cursor minted by one binary resolves against another, possibly older,
+// running elsewhere. Changing the hash would silently invalidate every stored
+// cursor in the world, so it has to break the build instead.
+func TestLogIDIsPinned(t *testing.T) {
+	pinned := []struct {
+		name string
+		id   sse.LogID
+	}{
+		{"events", 316203908},
+		{"metrics", 4041682038},
+		{"job.demo", 4070305913},
+		{"", 2166136261},
 	}
-	if sse.NewLogID("events") == sse.NewLogID("other") {
-		t.Error("distinct names collided")
+	for _, tt := range pinned {
+		if got := sse.NewLogID(tt.name); got != tt.id {
+			t.Errorf("NewLogID(%q) = %d, want %d — changing this invalidates every "+
+				"resumption cursor clients already hold", tt.name, got, tt.id)
+		}
+	}
+
+	seen := map[sse.LogID]string{}
+	for _, name := range []string{"events", "metrics", "job.demo", "tenant.acme", "tenant.globex"} {
+		id := sse.NewLogID(name)
+		if prev, dup := seen[id]; dup {
+			t.Errorf("%q and %q hash to the same log id %d", prev, name, id)
+		}
+		seen[id] = name
 	}
 }
 

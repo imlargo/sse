@@ -1,8 +1,8 @@
 GO ?= go
 
-.PHONY: all test race bench fuzz deps redis vet lint cover clean
+.PHONY: all test race bench fuzz deps redis compat vet lint check cover clean
 
-all: vet test deps
+all: vet lint test deps
 
 ## test: full suite, with goroutine leak detection
 test:
@@ -24,6 +24,10 @@ fuzz:
 redis:
 	cd logs/redis && $(GO) test -race -count=1 ./...
 
+## compat: third-party framework compatibility (Gin, Echo)
+compat:
+	cd compat && $(GO) test -race -count=1 ./...
+
 ## deps: RF-H1 — the root module must depend on the standard library only
 deps:
 	@out=$$($(GO) list -deps -f '{{if not .Standard}}{{.ImportPath}}{{end}}' ./... \
@@ -35,8 +39,22 @@ deps:
 	fi; \
 	echo "RF-H1 ok: standard library only"
 
+STATICCHECK ?= honnef.co/go/tools/cmd/staticcheck@latest
+
+# Every module, not just the root: the submodules are where third-party
+# dependencies live and are exactly where a lint finding is easiest to miss.
+MODULES = . logs/redis compat examples/04-distributed
+
 vet:
-	$(GO) vet ./...
+	@for m in $(MODULES); do echo "vet $$m"; (cd $$m && $(GO) vet ./...) || exit 1; done
+
+## lint: staticcheck across every module
+lint:
+	@for m in $(MODULES); do echo "staticcheck $$m"; \
+		(cd $$m && $(GO) run $(STATICCHECK) ./...) || exit 1; done
+
+## check: what CI runs, minus the services
+check: vet lint test deps
 
 cover:
 	$(GO) test -count=1 -coverprofile=coverage.out ./...
