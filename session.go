@@ -47,6 +47,18 @@ type Session struct {
 	resumeGap *Gap
 	resumable bool
 
+	// resub carries a new filter set from outside the session. EventSource
+	// cannot send anything, so changing a subscription has to arrive through a
+	// side channel — which is only possible because a session is addressable
+	// by id.
+	resub atomic.Pointer[[]Filter]
+
+	// reader is what the follow loop is currently blocked on. Resubscribe
+	// closes it to interrupt that block; the loop then reopens at the same
+	// position.
+	readerMu sync.Mutex
+	reader   Reader
+
 	// batch is the writer's scratch space for gathering queued events into one
 	// write. Owned by the writer goroutine alone.
 	batch []byte
@@ -247,6 +259,34 @@ func (s *Session) fail(err error) {
 func (s *Session) closeSend() {
 	s.closeSendOnce.Do(func() { close(s.sendClosed) })
 }
+
+// setReader records what the follow loop is blocked on, so it can be
+// interrupted from outside.
+func (s *Session) setReader(r Reader) {
+	s.readerMu.Lock()
+	s.reader = r
+	s.readerMu.Unlock()
+}
+
+// wakeFollower interrupts the follow loop by closing the reader it is waiting
+// on, which is the only thing that can unblock it short of an event arriving.
+func (s *Session) wakeFollower() {
+	s.readerMu.Lock()
+	r := s.reader
+	s.readerMu.Unlock()
+	if r != nil {
+		_ = r.Close()
+	}
+}
+
+// Stop asks the session to finish: it drains whatever is queued, tells the
+// client the stream is closing and hands it a jittered reconnection delay.
+//
+// It is how an application ends a session from outside — a signed-out user, a
+// revoked token, a tenant being suspended. The client reconnects by itself
+// through the protocol's own mechanism, so this is a way to force fresh
+// credentials rather than a way to cut somebody off.
+func (s *Session) Stop() { s.requestStop() }
 
 // requestStop asks the session to drain and finish, which is what a graceful
 // shutdown does to every live session.

@@ -1,6 +1,6 @@
 GO ?= go
 
-.PHONY: all test race bench fuzz deps redis compat fiber vet lint check cover clean
+.PHONY: all test race bench fuzz soak deps redis compat fiber vet lint check cover clean
 
 all: vet lint test deps
 
@@ -31,6 +31,10 @@ compat:
 ## fiber: the adapter for the one framework that needs one
 fiber:
 	cd adapters/fiber && $(GO) test -race -count=1 ./...
+
+## soak: RP-7, many connections with deliberately slow consumers
+soak:
+	$(GO) test -run TestSoak -v -timeout 15m -sse.soak.conns=15000 -sse.soak.duration=60s .
 
 ## deps: RF-H1 — the root module must depend on the standard library only
 deps:

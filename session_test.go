@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"testing/synctest"
@@ -297,7 +298,62 @@ func TestStreamIsFlushed(t *testing.T) {
 	})
 	// A stream that writes without flushing is not a stream: the bytes sit in
 	// a buffer and the client sees nothing.
-	if c.Flushes() < 2 {
-		t.Errorf("flushed %d times for 2 events, want at least 2", c.Flushes())
+	if c.Flushes() == 0 {
+		t.Error("nothing was ever flushed, so the client would see nothing")
 	}
+	if len(c.Messages()) != 2 {
+		t.Errorf("client saw %d messages, want the open event and one send", len(c.Messages()))
+	}
+}
+
+// RF-A10: what is already queued goes out in one write and one flush rather
+// than one of each per event.
+//
+// The cost of an event on the wire is dominated by the syscall, not by the
+// formatting, so a burst of a hundred events should be far fewer than a hundred
+// syscalls. Nothing is ever held back waiting for more, so a stream that
+// produces one event at a time is unaffected.
+func TestBurstsAreBatchedIntoOneWrite(t *testing.T) {
+	const events = 100
+
+	c := ssetest.NewConn()
+	// Slow enough that the producer gets ahead of the writer, which is what
+	// gives the writer something to gather.
+	c.Throttle(2 * time.Millisecond)
+	defer c.Close()
+
+	err := serveOn(t, c, func(ctx context.Context, s *sse.Session) error {
+		for i := range events {
+			if err := s.Send(ctx, sse.Text(strconv.Itoa(i)), sse.Name("e")); err != nil {
+				return err
+			}
+		}
+		return nil
+	}, sse.WithKeepAlive(0), sse.WithWriteTimeout(30*time.Second),
+		sse.WithBackpressure(sse.Backpressure{MaxEvents: 1024, MaxBytes: 1 << 20}))
+	if err != nil {
+		t.Fatalf("Serve: %v", err)
+	}
+
+	// Everything must still arrive, in order and exactly once. Batching is an
+	// optimisation, not a licence to lose events.
+	var got []string
+	for _, m := range c.Messages() {
+		if m.Type == "e" {
+			got = append(got, m.Data)
+		}
+	}
+	if len(got) != events {
+		t.Fatalf("received %d of %d events", len(got), events)
+	}
+	for i, d := range got {
+		if d != strconv.Itoa(i) {
+			t.Fatalf("event %d = %q, out of order", i, d)
+		}
+	}
+
+	if c.Flushes() >= events {
+		t.Errorf("%d flushes for %d events: the burst was not batched", c.Flushes(), events)
+	}
+	t.Logf("%d events delivered in %d flushes", events, c.Flushes())
 }

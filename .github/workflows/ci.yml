@@ -35,7 +35,21 @@ jobs:
       # RP-5: the whole suite under the race detector.
       # RP-4: leak detection runs inside it, via each package's TestMain.
       - name: Test (race)
-        run: go test -race -count=1 ./...
+        run: go test -race -count=1 -short ./...
+
+  # RP-7. Separate because it holds thousands of connections open and takes
+  # long enough that it should not sit in front of every other check.
+  soak:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+      - name: Sustained load
+        run: |
+          ulimit -n 65535
+          go test -run TestSoak -timeout 15m -sse.soak.conns=15000 -sse.soak.duration=60s .
 
   fuzz:
     runs-on: ubuntu-latest

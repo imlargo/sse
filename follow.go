@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 
 	"github.com/imlargo/sse/wire"
 )
@@ -39,6 +40,41 @@ func (s *Session) ResumeGap() *Gap { return s.resumeGap }
 // not fit the header budget — and in each case the client is told so when the
 // stream opens, rather than discovering it after a disconnection.
 func (s *Session) Resumable() bool { return s.resumable }
+
+// Resubscribe replaces what this session is subscribed to, while it is running.
+//
+// EventSource cannot send anything to the server, so a client that wants to
+// change its subscription has no way to say so on the stream itself. The way
+// round it is an ordinary request on the side, which is only possible because a
+// session is addressable: look it up by id through [Lifecycle.Session] and call
+// this.
+//
+//	s, ok := lifecycle.Session(r.FormValue("session"))
+//	if ok {
+//	    s.Resubscribe(sse.MustFilter("tenant.acme.builds"))
+//	}
+//
+// The stream does not restart. The subscriber keeps its position in the log, so
+// nothing is replayed and nothing is skipped; only what it accepts from here
+// changes. It takes effect on the next event.
+func (s *Session) Resubscribe(filters ...Filter) error {
+	if !s.following.Load() {
+		return fmt.Errorf("sse: Resubscribe: this session is not following a log")
+	}
+	for i, f := range filters {
+		if f.IsZero() {
+			return fmt.Errorf("sse: Resubscribe: filter %d is the zero Filter; build it with sse.NewFilter", i)
+		}
+	}
+	next := slices.Clone(filters)
+	s.resub.Store(&next)
+
+	// Waking the reader is what makes this take effect promptly rather than at
+	// the next event. The follow loop notices the pending change and reopens
+	// at the same position.
+	s.wakeFollower()
+	return nil
+}
 
 // Follow streams the session's log from the client's position until the context
 // ends, the client disappears or the log closes.
@@ -90,7 +126,11 @@ func (s *Session) follow(ctx context.Context, filters []Filter) error {
 	if err != nil {
 		return err
 	}
-	defer reader.Close()
+	s.setReader(reader)
+	defer func() {
+		s.setReader(nil)
+		reader.Close()
+	}()
 
 	// Whatever the reader knows was lost is merged with whatever was already
 	// determined from the cursor itself, and declared before a single event is
@@ -107,11 +147,26 @@ func (s *Session) follow(ctx context.Context, filters []Filter) error {
 	for {
 		entry, err := reader.Next(ctx)
 		if err != nil {
+			// A pending resubscription looks like a closed reader, because
+			// closing it is how the follower is interrupted. Reopening at the
+			// same position keeps the subscriber where it was: nothing is
+			// replayed and nothing is skipped.
+			if next := s.resub.Swap(nil); next != nil && ctx.Err() == nil {
+				filters = *next
+				reader.Close()
+				reader, err = s.log.Read(ctx, after, ReadOptions{Filters: filters})
+				if err != nil {
+					return err
+				}
+				s.setReader(reader)
+				continue
+			}
 			if errors.Is(err, ErrLogClosed) || errors.Is(err, context.Canceled) {
 				return nil
 			}
 			return err
 		}
+		after = entry.Offset
 
 		// Anything the backpressure policy discarded is declared before the
 		// next event, so the client never receives a stream with an
