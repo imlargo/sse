@@ -43,8 +43,9 @@ Arquitectura cerrada (`06`) y fases 0 a 2 del plan (`07`) implementadas.
 | 3 · El Log | hecha — offsets, epoch, retención, cursor, huecos declarados |
 | 4 · Broker: topics y contrapresión | hecha — filtros jerárquicos, cinco políticas, checkpoint de cursor |
 | 5 · Autorización y observabilidad | hecha — Authorizer/Grant, denegación declarada, métricas sin dependencias |
-| 6 · Distribución (Redis, NATS) | siguiente |
-| 7-8 | pendientes |
+| 6 · Distribución | hecha — Redis Streams, reanudación entre nodos verificada |
+| 7 · Catálogo y OpenAPI 3.2 | siguiente |
+| 8 · Adaptadores, docs y congelación | pendiente |
 
 ```go
 http.Handle("/chat", sse.Handler(func(ctx context.Context, s *sse.Session) error {
@@ -98,6 +99,19 @@ func authorize(r *http.Request) (sse.Grant, error) {
 ```
 
 `go run ./examples/02-multi-tenant` y `go run ./examples/03-dashboard`.
+
+En varios nodos — **la única línea que cambia en toda la aplicación**:
+
+```go
+// log0 := sse.NewMemoryLog(retention)
+log0, err := redislog.New(ctx, rdb, "sse:events", retention)
+```
+
+Ni el authorizer, ni los topics, ni el handler, ni la política de contrapresión.
+Verificado con dos procesos: el cliente se corta en el nodo A en el seq 9,
+reconecta contra el **nodo B**, que nunca lo había visto, y continúa en el seq 10
+sin huecos. Sin sesiones pegajosas: el cursor nombra un log y un offset, no un
+nodo. `go run ./examples/04-distributed`.
 
 ### Medido
 
