@@ -99,10 +99,7 @@ func TestResubscribeWithoutReconnecting(t *testing.T) {
 
 	// The stream did not restart, so nothing was replayed, and what is no
 	// longer subscribed no longer arrives.
-	var got []string
-	for _, d := range dataOf(conn, "e") {
-		got = append(got, d)
-	}
+	got := dataOf(conn, "e")
 	for _, d := range got {
 		if d == "before-builds" {
 			t.Error("resubscribing replayed an event from before the change; the position was not kept")
