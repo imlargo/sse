@@ -6,7 +6,7 @@ resto. Cada decisión indica **qué se decide**, **por qué**, **contra qué pri
 de `00`**, **qué requerimientos de `03` cubre** y **qué queda disponible para el
 10% de casos que se salen del camino feliz**.
 
-Nombre del proyecto: **`spillway`** — ver D-10.
+Nombre del proyecto: **`sse`** — ver D-10.
 
 ---
 
@@ -192,15 +192,15 @@ Superficie pública:
 
 ```go
 b.Publish(ctx, topic, evento)                 // valor tipado, Codec por defecto (JSON)
-b.Publish(ctx, topic, spillway.Raw(bytes))    // bytes ya hechos
-b.Publish(ctx, topic, spillway.Text(s))       // texto crudo
-b.Publish(ctx, topic, spillway.From(r))       // desde un io.Reader
+b.Publish(ctx, topic, sse.Raw(bytes))    // bytes ya hechos
+b.Publish(ctx, topic, sse.Text(s))       // texto crudo
+b.Publish(ctx, topic, sse.From(r))       // desde un io.Reader
 ```
 
 Y para quien quiere comprobación en compilación (RF-G6):
 
 ```go
-var TicketCreated = spillway.Declare[Ticket]("ticket.created")
+var TicketCreated = sse.Declare[Ticket]("ticket.created")
 TicketCreated.Publish(ctx, b, topic, t)       // no compila con otro tipo
 ```
 
@@ -357,7 +357,7 @@ funcionalidad: ¿quieres retener las notificaciones 7 días y los ticks 30
 segundos? Dos logs. Es honesto, cuesta cero y es como funcionan Redis y Kafka de
 verdad.
 
-**Una añadidura barata:** una marca por evento `spillway.Ephemeral` = "entrégalo
+**Una añadidura barata:** una marca por evento `sse.Ephemeral` = "entrégalo
 en vivo, no lo retengas". Cubre el caso real de ticks de alta frecuencia dentro de
 un log retenido, sin inventar una jerarquía de políticas.
 
@@ -391,7 +391,7 @@ del usuario.
 
 **RF-F2.** Un topic pedido y no concedido produce un rechazo 403 por defecto, o
 —si se configura— un stream que arranca con un evento reservado
-`spillway.open` listando explícitamente `granted` y `denied`. Nunca un stream
+`sse.open` listando explícitamente `granted` y `denied`. Nunca un stream
 vacío en silencio.
 
 **RF-F3.** `Grant.Deadline` cierra la sesión al expirar el token. El cliente
@@ -406,19 +406,19 @@ token en un no-evento.
 **Decisión.**
 
 ```
-github.com/imlargo/spillway                  módulo raíz — SOLO stdlib
-  spillway/                                  paquete principal
-  spillway/wire/                             formato de cable, valor autónomo
-  spillway/spillwaytest/                     transporte en memoria, helpers, detección de fugas
+github.com/imlargo/sse                  módulo raíz — SOLO stdlib
+  sse/                                  paquete principal
+  sse/wire/                             formato de cable, valor autónomo
+  sse/ssetest/                          transporte en memoria, helpers, detección de fugas
 
-github.com/imlargo/spillway/logs/redis       módulos aparte, go.mod propio
-github.com/imlargo/spillway/logs/nats
-github.com/imlargo/spillway/adapters/gin
-github.com/imlargo/spillway/adapters/fiber
-github.com/imlargo/spillway/adapters/echo
-github.com/imlargo/spillway/metrics/prometheus
-github.com/imlargo/spillway/metrics/otel
-github.com/imlargo/spillway/openapi
+github.com/imlargo/sse/logs/redis       módulos aparte, go.mod propio
+github.com/imlargo/sse/logs/nats
+github.com/imlargo/sse/adapters/gin
+github.com/imlargo/sse/adapters/fiber
+github.com/imlargo/sse/adapters/echo
+github.com/imlargo/sse/metrics/prometheus
+github.com/imlargo/sse/metrics/otel
+github.com/imlargo/sse/openapi
 ```
 
 **RF-H1 se verifica mecánicamente en CI**, no por buena voluntad:
@@ -450,7 +450,7 @@ permite probar la conformidad sin levantar un servidor.
   elección obligatoria** — obligar a decidir en el camino feliz viola la
   prioridad #1. `DropOldest` degrada de forma predecible y, con retención
   activada, es **recuperable**.
-- **Clave de fusión explícita**, `spillway.WithKey("entidad:42")`. Ni reflexión
+- **Clave de fusión explícita**, `sse.WithKey("entidad:42")`. Ni reflexión
   sobre el payload, ni derivada del topic. Cero magia.
 - **Se fija al suscribir, inmutable durante la sesión** (RF-E6). Cambiarla es una
   sesión nueva; el canal lateral de RF-B5 puede renegociarla.
@@ -459,29 +459,36 @@ permite probar la conformidad sin levantar un servidor.
 
 **RF-D6, hecho coherente y no solo advertido.** Si la política descarta o
 desconecta **y la retención del log es cero**, entonces: se emite un aviso por
-`slog` al construir, y el evento `spillway.open` declara al cliente
+`slog` al construir, y el evento `sse.open` declara al cliente
 `delivery: at-most-once, recovery: none`. No se prohíbe la combinación —sería
 paternalista— pero ni el operador ni el cliente pueden no enterarse.
 
 ---
 
-## D-10 · Nombre → **`spillway`**
+## D-10 · Nombre → **`sse`**
 
-`spillway` es el aliviadero: la estructura que deja salir el exceso de agua de una
-presa de forma controlada, sin que la presa reviente. Es literalmente la
-contrapresión.
+**Decisión del autor.** Módulo `github.com/imlargo/sse`, paquete `sse`.
 
-Criterios de `05`: es buscable (`spillway go sse` no colisiona con nada), no choca
-con ninguna librería del ecosistema Go, y funciona bien como calificador de
-import (`spillway.Publish`, `spillway.Topic`).
+```go
+import "github.com/imlargo/sse"
 
-Alternativa descartada por buscabilidad: `weir` — más corto y con la misma
-metáfora (regula **y mide** el caudal: contrapresión y observabilidad), pero
-palabra oscura y colisiona con un proyecto de TiDB.
+sse.Handler(...)   sse.New(...)   sse.MustTopic("org.42.tickets")
+```
 
-**Es la única decisión de este documento que es puro gusto y que es trivialmente
-reversible antes de la v1.** Si no convence, se cambia sin tocar una línea de
-diseño.
+**Lo que gana:** el nombre dice exactamente qué es. No hay que explicarlo, no hay
+metáfora que aprender, y el calificador de import es corto y se lee bien en cada
+punto de llamada. Coincide además con el nombre del repositorio.
+
+**El coste, declarado:** `sse` es también el nombre de paquete de
+`tmaxmax/go-sse` y de `jetify-com/sse`. Quien use dos librerías de SSE a la vez
+necesita un alias de import — molestia menor y poco frecuente. Y la
+buscabilidad no viene del nombre, que es un término genérico y muy disputado,
+sino del README, de los no-objetivos declarados en voz alta y de la suite de
+conformidad publicada. Eso desplaza trabajo a la Fase 8, donde ya estaba.
+
+**Espacio de eventos reservado** (RF-E4): prefijo `sse.` por defecto —
+`sse.open`, `sse.gap`, `sse.closing` — configurable, con validación que impide
+al usuario invadirlo.
 
 ---
 
@@ -493,9 +500,9 @@ diseño es bueno. Contraste:
 **Nivel 0 — proxy de streaming de un LLM**
 
 ```go
-http.Handle("/chat", spillway.Handler(func(ctx context.Context, s *spillway.Session) error {
+http.Handle("/chat", sse.Handler(func(ctx context.Context, s *sse.Session) error {
     for tok := range llm.Stream(ctx, prompt) {
-        if err := s.Send(ctx, spillway.Text(tok)); err != nil {
+        if err := s.Send(ctx, sse.Text(tok)); err != nil {
             return err
         }
     }
@@ -509,17 +516,17 @@ la librería. El bucle es sobre *su* fuente de datos, que es el shape de FastAPI
 **Nivel 2 — notificaciones multi-tenant**
 
 ```go
-b := spillway.New(spillway.WithRetention(spillway.Retention{For: 5 * time.Minute}))
+b := sse.New(sse.WithRetention(sse.Retention{For: 5 * time.Minute}))
 http.Handle("/events", b.Handler(authorize))
-b.Publish(ctx, spillway.MustTopic("org.42.tickets"), ticket)
+b.Publish(ctx, sse.MustTopic("org.42.tickets"), ticket)
 ```
 
 **Nivel 3 — lo mismo, en varios nodos**
 
 ```go
-b := spillway.New(
-    spillway.WithLog(redislog.New(client, "events")),   // <- única línea que cambia
-    spillway.WithRetention(spillway.Retention{For: 5 * time.Minute}),
+b := sse.New(
+    sse.WithLog(redislog.New(client, "events")),   // <- única línea que cambia
+    sse.WithRetention(sse.Retention{For: 5 * time.Minute}),
 )
 ```
 

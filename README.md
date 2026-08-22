@@ -38,5 +38,5 @@ Arquitectura cerrada, sin código todavía.
 - Especificación verificada contra la fuente normativa (WHATWG HTML §9.2) y estado
   del arte contrastado. Las correcciones a `02` y `04` están anotadas en `06`.
 - Las diez decisiones de `05` están resueltas en `06`.
-- Nombre de la librería: **`spillway`**.
+- Nombre de la librería: **`sse`**.
 - Siguiente paso: Fase 0 de `07-plan-de-trabajo.md`.

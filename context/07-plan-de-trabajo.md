@@ -33,7 +33,7 @@ dependencias fallando a propósito si se añade una dependencia externa al núcl
 
 ---
 
-## Fase 1 · Capa de cable (`spillway/wire`) — M · *paralelizable con Fase 2*
+## Fase 1 · Capa de cable (`sse/wire`) — M · *paralelizable con Fase 2*
 
 La pieza con valor autónomo. Se construye primero porque es la única con una
 fuente normativa contra la que verificar, y porque todo lo demás la usa.
@@ -101,11 +101,11 @@ El nivel 0 completo. Es la fase donde se rompe con Medusa.
   writer**. Nunca abrir un stream que no se puede vaciar.
 - Independencia del método (RF-A4), con el caso POST/MCP probado explícitamente
   — incluida la ruta con cuerpo sin drenar, donde `r.Context()` no se cancela.
-- Apagado grácil (RF-E1): drenar, emitir `spillway.closing`, cerrar el último
+- Apagado grácil (RF-E1): drenar, emitir `sse.closing`, cerrar el último
   bloque con línea en blanco.
 - **Antiavalancha (RF-E2):** emitir `retry:` con jitter por conexión antes de
   cerrar. Es el único lever que el protocolo da y es suficiente.
-- Espacio reservado `spillway.*` configurable, con validación que impida al
+- Espacio reservado `sse.*` configurable, con validación que impida al
   usuario invadirlo (RF-E4).
 - Aislamiento de pánicos de código de usuario a la sesión afectada (RF-E5).
 - Errores tipados (RNF-8).
@@ -135,11 +135,11 @@ El corazón. Fase 3 y 4 son el diferenciador; todo lo anterior es mesa puesta.
 - **Códec del cursor** (D-04): `v1.<epoch>.<vector>`, base64url, presupuesto en
   bytes declarado. Si no cabe ⇒ la sesión declara `resumable: false` (RF-C12).
 - Detección y declaración de huecos (RF-C4): offset pedido < offset más antiguo
-  retenido ⇒ evento reservado `spillway.gap` con el rango perdido, **entregado
+  retenido ⇒ evento reservado `sse.gap` con el rango perdido, **entregado
   antes** de reanudar la entrega normal.
 - Detección de generación anterior por `epoch` (RF-C5).
 - Checkpoint del cursor en heartbeats mediante `id:` sin `data`.
-- Evento `spillway.open` con las capacidades (RF-E3): id de sesión, resumible
+- Evento `sse.open` con las capacidades (RF-E3): id de sesión, resumible
   sí/no, ventana de retención, filtros concedidos y denegados, semántica de
   entrega declarada.
 
@@ -167,7 +167,7 @@ viejos en vez de resolverlos contra posiciones distintas.
 - Buffer de fusión por clave explícita (`Coalesce`), opt-in y con coste solo
   cuando se usa (RNF-4).
 - Coherencia RF-D6: aviso por `slog` al construir y declaración en
-  `spillway.open` cuando se combina descarte agresivo con retención cero.
+  `sse.open` cuando se combina descarte agresivo con retención cero.
 - Todo descarte y toda desconexión emiten señal observable con motivo
   distinguible (RF-D5).
 
@@ -237,7 +237,7 @@ grande.
   catálogo.** No se inventa ningún formato.
 - Generación de tipos TypeScript y de un cliente tipado para el frontend, a partir
   del mismo catálogo. Es el diferenciador que ninguna librería Go de SSE ofrece.
-- Derivar de la misma declaración el contenido de `spillway.open` (RF-E3).
+- Derivar de la misma declaración el contenido de `sse.open` (RF-E3).
 
 AsyncAPI queda como **segundo emisor opcional post-v1**, no como decisión
 pendiente. Encaja además con que Medusa ya emita OpenAPI.
@@ -288,7 +288,7 @@ Declarado aquí para que no se cuele por la puerta de atrás:
 | **Dos goroutines por sesión** a 50 000 conexiones = 100 000 goroutines | Coste conocido y declarado en los benchmarks desde la Fase 2, no descubierto en la Fase 8. Es el precio de que RF-A2 y RF-A5 sean ciertos a la vez |
 | El cursor vectorial **no cabe** en el presupuesto de cabecera con muchos logs | RF-C12 ya obliga a declarar `resumable: false` en vez de degradarse. La variante de handle en servidor existe como opción del 10% |
 | Un log único es **un punto de contención** de escritura | Append de bytes ya codificados con lock de nanosegundos, lectores sin lock vía offset atómico. Particionar en varios logs está disponible cuando haga falta, con la pérdida de orden global documentada |
-| `RF-C1` (historial apagado) frente a "el log existe siempre" | Resuelto en T-01 como promesa semántica. Hay que **probar** que con retención por defecto no se retiene nada consultable y `spillway.open` declara `resumable: false` |
+| `RF-C1` (historial apagado) frente a "el log existe siempre" | Resuelto en T-01 como promesa semántica. Hay que **probar** que con retención por defecto no se retiene nada consultable y `sse.open` declara `resumable: false` |
 | La ergonomía se degrada al subir de nivel | El criterio cualitativo de `00` es la prueba: los cinco ejemplos se revisan al final de cada fase, no solo en la Fase 8 |
 
 ---
