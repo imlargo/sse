@@ -104,14 +104,30 @@ func (b *Broker) Subscribe(ctx context.Context, s *Session, filters ...Filter) e
 // is what a single broadcast channel wants. Constraining that per client is the
 // job of authorization.
 func (b *Broker) Handler(opts ...Option) http.Handler {
-	return b.HandlerFunc(func(ctx context.Context, s *Session) error {
-		filters, err := FiltersFromQuery(s.Request(), TopicQueryParam)
-		if err != nil {
-			return &StatusError{Code: http.StatusBadRequest, Message: err.Error(), Err: err}
-		}
+	inner := b.HandlerFunc(func(ctx context.Context, s *Session) error {
+		filters, _ := s.Request().Context().Value(filtersKey{}).([]Filter)
 		return b.Subscribe(ctx, s, filters...)
 	}, opts...)
+
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Parsed before the stream opens, so a bad filter is an ordinary 400
+		// with an explanation. Once the response has been committed as a
+		// 200 text/event-stream there is no status left to send, and a client
+		// that receives a non-200 stops reconnecting permanently — so getting
+		// this order wrong turns a typo into a client that never comes back
+		// (RF-F1).
+		filters, err := FiltersFromQuery(r, TopicQueryParam)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		inner.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), filtersKey{}, filters)))
+	})
 }
+
+// filtersKey carries filters resolved before the stream opened through to the
+// stream function.
+type filtersKey struct{}
 
 // HandlerFunc returns a handler bound to this broker's log, running fn as the
 // stream. Use it when the subscription is decided by something other than the

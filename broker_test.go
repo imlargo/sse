@@ -3,6 +3,7 @@ package sse_test
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
@@ -282,5 +283,56 @@ func TestOneConnectionCarriesSeveralStreams(t *testing.T) {
 	c := serveBroker(t, b, "topic=chat.>&topic=presence.>&topic=notifications.user.7", 4)
 	if got := len(dataOf(c, "e")); got != 3 {
 		t.Errorf("one connection carried %d of 3 logical streams", got)
+	}
+}
+
+// RF-F1: the decision to accept a connection happens before the stream opens,
+// so a rejection is an ordinary HTTP response with a status code.
+//
+// Order matters more than usual here. Once a 200 text/event-stream response is
+// committed there is no status left to send, and a client that receives a
+// non-200 stops reconnecting permanently — so validating too late turns a typo
+// in a query string into a client that never comes back.
+func TestBadFilterIsRejectedBeforeTheStreamOpens(t *testing.T) {
+	log := sse.NewMemoryLog(sse.Retention{Events: 10})
+	defer log.Close()
+	b := sse.NewBroker("events", log)
+
+	bad := []string{
+		"topic=org.%3E.bad",                 // tail wildcard in the middle
+		"topic=org%23fragment",              // '#' truncates in a browser
+		"topic=",                            // empty
+		"topic=" + strings.Repeat("a", 300), // over the length limit
+	}
+	for _, q := range bad {
+		t.Run(q[:min(len(q), 30)], func(t *testing.T) {
+			w := httptest.NewRecorder()
+			b.Handler().ServeHTTP(w, httptest.NewRequest("GET", "/events?"+q, nil))
+
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400; the stream must not open on a bad filter", w.Code)
+			}
+			if ct := w.Header().Get("Content-Type"); strings.Contains(ct, "event-stream") {
+				t.Errorf("a stream was opened anyway (Content-Type %q)", ct)
+			}
+			if w.Body.Len() == 0 {
+				t.Error("the rejection explains nothing")
+			}
+		})
+	}
+
+	// And a good one still opens. The stream would otherwise run forever, so
+	// it is given a deadline.
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/events?topic=org.42.%3E", nil).WithContext(ctx)
+	b.Handler(sse.WithKeepAlive(0)).ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("a valid filter was rejected with %d", w.Code)
+	}
+	if ct := w.Header().Get("Content-Type"); !strings.Contains(ct, "event-stream") {
+		t.Errorf("Content-Type = %q, want an event stream", ct)
 	}
 }

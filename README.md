@@ -41,8 +41,9 @@ Arquitectura cerrada (`06`) y fases 0 a 2 del plan (`07`) implementadas.
 | 1 · Capa de cable (`wire/`) | hecha — 32 vectores de conformidad, fuzzing, **0 asignaciones por evento** |
 | 2 · Sesión y transporte | hecha — nivel 0 completo, con ejemplo ejecutable |
 | 3 · El Log | hecha — offsets, epoch, retención, cursor, huecos declarados |
-| 4 · Broker: topics y contrapresión | siguiente |
-| 5-8 | pendientes |
+| 4 · Broker: topics y contrapresión | hecha — filtros jerárquicos, cinco políticas, checkpoint de cursor |
+| 5 · Autorización y observabilidad | siguiente |
+| 6-8 | pendientes |
 
 ```go
 http.Handle("/chat", sse.Handler(func(ctx context.Context, s *sse.Session) error {
@@ -68,8 +69,25 @@ http.Handle("/job", sse.Handler(sse.Follow, sse.WithLog("job", log)))
 `go run ./examples/01-resumable-job`. Verificado sobre socket real: cliente cortado
 en el paso 4, reconexión con un cursor de 27 caracteres, primer evento el paso 5.
 
-Medido: **0 asignaciones** por evento codificado, y el coste de difusión es
-**idéntico con 1 y con 1000 suscriptores** (1 alloc/op en ambos).
+Con topics, para multi-tenant — publicar nombra un topic concreto, suscribirse usa
+filtros:
+
+```go
+b := sse.NewBroker("events", log)
+http.Handle("/events", b.Handler())          // ?topic=tenant.acme.>
+b.Publish(ctx, sse.MustTopic("tenant.acme.tickets"), ticket)
+```
+
+`go run ./examples/02-multi-tenant` y `go run ./examples/03-dashboard`.
+
+### Medido
+
+| | |
+|---|---|
+| Codificación de evento | **0 allocs/op** |
+| Coincidencia de filtro | **0 allocs/op**, 17–33 ns |
+| Coste de difusión | **1 alloc/op con 1 suscriptor y con 1000** |
+| Cursor de un solo log | **31 bytes** |
 
 Especificación verificada contra la fuente normativa (WHATWG HTML §9.2); las
 correcciones a `02` y `04` están anotadas en `06`.
