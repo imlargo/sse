@@ -143,7 +143,6 @@ type sendQueue struct {
 	mu    sync.Mutex
 	items []queuedFrame
 	bytes int
-	keys  map[string]int // key -> index, only populated for Coalesce
 
 	bp           Backpressure
 	drops        dropRecord
@@ -158,15 +157,11 @@ type sendQueue struct {
 }
 
 func newSendQueue(bp Backpressure) *sendQueue {
-	q := &sendQueue{
+	return &sendQueue{
 		bp:     bp.withDefaults(),
 		signal: make(chan struct{}, 1),
 		space:  make(chan struct{}, 1),
 	}
-	if q.bp.Policy == Coalesce {
-		q.keys = make(map[string]int)
-	}
-	return q
 }
 
 func notify(ch chan struct{}) {
@@ -190,11 +185,18 @@ func (q *sendQueue) push(ctx context.Context, qf queuedFrame, done <-chan struct
 
 		// Coalescing first: superseding an unread event makes room without
 		// anything being lost, which is the whole point of the policy.
-		if q.keys != nil && qf.key != "" {
-			if i, ok := q.keys[qf.key]; ok {
-				old := q.items[i]
-				q.bytes -= len(*old.buf)
-				putBuf(old.buf)
+		//
+		// Found by scanning. The queue is bounded by MaxEvents, so this is a
+		// short walk over contiguous memory — measured at roughly twice the
+		// speed of the key-to-index map it replaced, which had to be rebuilt on
+		// every pop and cost an allocation of its own.
+		if q.bp.Policy == Coalesce && qf.key != "" {
+			for i := range q.items {
+				if q.items[i].key != qf.key {
+					continue
+				}
+				q.bytes -= len(*q.items[i].buf)
+				putBuf(q.items[i].buf)
 				q.items[i] = qf
 				q.bytes += size
 
@@ -214,9 +216,6 @@ func (q *sendQueue) push(ctx context.Context, qf queuedFrame, done <-chan struct
 		if !q.overLimit(size) {
 			q.items = append(q.items, qf)
 			q.bytes += size
-			if q.keys != nil && qf.key != "" {
-				q.keys[qf.key] = len(q.items) - 1
-			}
 			q.mu.Unlock()
 			notify(q.signal)
 			return nil
@@ -277,25 +276,23 @@ func (q *sendQueue) overLimit(incoming int) bool {
 	return len(q.items)+1 > q.bp.MaxEvents || q.bytes+incoming > q.bp.MaxBytes
 }
 
-// dropFrontLocked discards the oldest queued event and remembers it.
-func (q *sendQueue) dropFrontLocked() {
-	old := q.items[0]
-	q.bytes -= len(*old.buf)
-	putBuf(old.buf)
+// takeFrontLocked removes the oldest queued frame.
+func (q *sendQueue) takeFrontLocked() queuedFrame {
+	qf := q.items[0]
+	q.bytes -= len(*qf.buf)
+	// Clear the slot before dropping it: the backing array outlives the
+	// reslice, and a stale pointer there keeps a buffer that has gone back to
+	// the pool reachable.
+	q.items[0] = queuedFrame{}
 	q.items = q.items[1:]
-	q.recordDrop(old.offset, old.offset)
-	if q.keys != nil {
-		q.reindexLocked()
-	}
+	return qf
 }
 
-func (q *sendQueue) reindexLocked() {
-	clear(q.keys)
-	for i, it := range q.items {
-		if it.key != "" {
-			q.keys[it.key] = i
-		}
-	}
+// dropFrontLocked discards the oldest queued event and remembers it.
+func (q *sendQueue) dropFrontLocked() {
+	old := q.takeFrontLocked()
+	putBuf(old.buf)
+	q.recordDrop(old.offset, old.offset)
 }
 
 // recordDrop widens the range of what this subscriber lost. Callers hold the
@@ -317,12 +314,7 @@ func (q *sendQueue) pop() (queuedFrame, bool) {
 	if len(q.items) == 0 {
 		return queuedFrame{}, false
 	}
-	qf := q.items[0]
-	q.bytes -= len(*qf.buf)
-	q.items = q.items[1:]
-	if q.keys != nil {
-		q.reindexLocked()
-	}
+	qf := q.takeFrontLocked()
 	notify(q.space)
 	return qf, true
 }

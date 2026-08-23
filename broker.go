@@ -75,7 +75,7 @@ func (b *Broker) Publish(ctx context.Context, topic Topic, v any, opts ...SendOp
 	if topic.IsZero() {
 		return 0, fmt.Errorf("sse: Publish: topic must not be empty; build one with sse.NewTopic")
 	}
-	return b.pub.Publish(ctx, v, append(opts, WithTopic(topic))...)
+	return b.pub.publish(ctx, topic, v, opts)
 }
 
 // Subscribe streams the broker's log to a session, delivering only events the

@@ -57,11 +57,22 @@ func NewMemoryLog(r Retention) *MemoryLog {
 	if !resumable {
 		r = defaultWindow
 	}
+	// Give the window a head start so a busy log does not spend its first
+	// thousand appends growing and copying. Capped, because a retention of a
+	// million events should not cost a hundred megabytes before the first
+	// publish.
+	const presizeCap = 1024
+	presize := r.Events
+	if presize <= 0 || presize > presizeCap {
+		presize = presizeCap
+	}
+
 	return &MemoryLog{
 		epoch:     newEpoch(),
 		retention: r,
 		resumable: resumable,
 		wake:      newWakeSet(),
+		entries:   make([]Entry, 0, presize),
 	}
 }
 

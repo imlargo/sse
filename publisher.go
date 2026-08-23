@@ -64,7 +64,14 @@ func (p *Publisher) Log() Log { return p.log }
 // once here, before any subscriber is involved, which is what keeps fan-out to
 // a single encoding.
 func (p *Publisher) Publish(ctx context.Context, v any, opts ...SendOption) (Offset, error) {
-	var o sendOpts
+	return p.publish(ctx, Topic{}, v, opts)
+}
+
+// publish is the shared path. The topic is a parameter rather than a
+// SendOption because a broker sets it on every single event, and expressing it
+// as an option cost a closure and a slice per publish for nothing.
+func (p *Publisher) publish(ctx context.Context, topic Topic, v any, opts []SendOption) (Offset, error) {
+	o := sendOpts{topic: topic}
 	for _, fn := range opts {
 		if fn != nil {
 			fn(&o)
@@ -97,7 +104,11 @@ func (p *Publisher) Publish(ctx context.Context, v any, opts ...SendOption) (Off
 	// The frame is encoded without an id: the id encodes the offset, and the
 	// offset does not exist until the append below returns. Each subscriber
 	// gets its own id line prepended at write time.
-	encoded, err := wire.AppendEvent(nil, wire.Event{Name: o.name, Data: body})
+	// Sized exactly, so the frame is one allocation rather than several as it
+	// grows. It outlives this call — the log keeps it and every subscriber
+	// writes it — so it cannot come from the pool.
+	ev := wire.Event{Name: o.name, Data: body}
+	encoded, err := wire.AppendEvent(make([]byte, 0, ev.Size()), ev)
 	putBuf(data)
 	if err != nil {
 		return 0, err
