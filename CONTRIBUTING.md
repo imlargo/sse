@@ -86,6 +86,18 @@ implementations can run the same vectors:
 go test ./wire -run TestConformanceExport -update
 ```
 
+**Locks are never nested.** No lock is held while acquiring another, while
+blocking on a channel, or while calling out to application code — a `Transport`,
+a `Codec`, a metrics hook. That is what makes a lock-ordering deadlock
+impossible rather than merely unlikely, and copying a value out before releasing
+the lock has so far always been enough to keep it that way.
+
+**Anything running on a goroutine this library started must recover.** A panic
+on a bare goroutine cannot be recovered by whoever started it, so a bug in an
+adapter or a metrics exporter would take the process down with every other
+connection on it. The writer goroutine recovers; anything new that runs on its
+own goroutine has to as well.
+
 **Nothing on the delivery path may allocate per subscriber, use reflection, or
 be an open interface.** The last one is a design decision rather than a
 performance one, and the reasoning is in `docs/06-decisiones-cerradas.md`.

@@ -324,9 +324,23 @@ func (s *Session) requestStop() {
 }
 
 // pump owns the transport. It is the only goroutine that writes to it.
+//
+// It runs on its own goroutine, which is why it recovers. Everything it calls
+// out to is somebody else's code — a [Transport] from a framework adapter, a
+// [Metrics] hook from an exporter — and a panic on a bare goroutine cannot be
+// recovered by the handler that started it. Without this, one adapter bug ends
+// the process and every other connection on it, rather than the one session
+// that hit it (RF-E5).
 func (s *Session) pump() {
 	defer close(s.done)
 	defer s.queue.close()
+	defer func() {
+		if r := recover(); r != nil {
+			s.fail(&PanicError{Value: r, Stack: debug.Stack()})
+			s.cfg.logger.Error("sse: panic in the connection writer; the session was ended",
+				"session", s.id, "panic", r)
+		}
+	}()
 
 	var timer *time.Timer
 	var tick <-chan time.Time

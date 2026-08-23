@@ -174,7 +174,7 @@ func serveWithGrant(ctx context.Context, t Transport, r *http.Request, fn Stream
 }
 
 func serve(ctx context.Context, t Transport, r *http.Request, fn StreamFunc, cfg *config,
-	grant Grant) error {
+	grant Grant) (err error) {
 
 	bp := cfg.backpressure
 	if grant.Backpressure != nil {
@@ -229,7 +229,37 @@ func serve(ctx context.Context, t Transport, r *http.Request, fn StreamFunc, cfg
 	setStreamHeaders(t.Header(), r)
 	t.WriteHeader(http.StatusOK)
 
+	stats := SessionStats{
+		SessionID: s.id,
+		Identity:  grant.Identity,
+		Resumable: s.resumable,
+		Filters:   len(grant.Filters),
+	}
+
 	go s.pump()
+
+	// From here the writer is running and the session may be registered, so
+	// winding both down has to be deferred rather than written at the end.
+	// Anything in between can panic — a metrics hook, an authorizer's leftover
+	// state, the application — and net/http will contain that panic for the
+	// request while leaving this session's goroutine running and its entry in
+	// the registry for as long as the process lives.
+	defer func() {
+		// No more events. Whatever is queued is still written first.
+		s.closeSend()
+		<-s.done
+
+		if err == nil {
+			err = s.Err()
+		}
+		stats.Reason = reasonFor(err)
+		cfg.metrics.sessionClosed(stats, err)
+		if cfg.lifecycle != nil {
+			cfg.lifecycle.remove(s)
+			cfg.metrics.nodeSessionsActive(cfg.lifecycle.NodeSessionCount())
+		}
+		logEnd(ctx, cfg, s, err)
+	}()
 
 	// RF-F3: a credential that expires mid-stream ends the session, and the
 	// client reconnects by itself with a fresh one and resumes from its
@@ -242,18 +272,12 @@ func serve(ctx context.Context, t Transport, r *http.Request, fn StreamFunc, cfg
 		defer timer.Stop()
 	}
 
-	stats := SessionStats{
-		SessionID: s.id,
-		Identity:  grant.Identity,
-		Resumable: s.resumable,
-		Filters:   len(grant.Filters),
-	}
 	cfg.metrics.sessionOpened(stats)
 	if cfg.lifecycle != nil {
 		cfg.metrics.nodeSessionsActive(cfg.lifecycle.NodeSessionCount())
 	}
 
-	err := s.writeOpen()
+	err = s.writeOpen()
 	switch {
 	case err != nil:
 	case draining:
@@ -264,22 +288,6 @@ func serve(ctx context.Context, t Transport, r *http.Request, fn StreamFunc, cfg
 		err = runGuarded(streamCtx, s, fn)
 	}
 
-	// No more events. Whatever is queued is still written before the writer exits.
-	s.closeSend()
-	<-s.done
-
-	if err == nil {
-		err = s.Err()
-	}
-
-	stats.Reason = reasonFor(err)
-	cfg.metrics.sessionClosed(stats, err)
-	if cfg.lifecycle != nil {
-		cfg.lifecycle.remove(s)
-		cfg.metrics.nodeSessionsActive(cfg.lifecycle.NodeSessionCount())
-	}
-
-	logEnd(ctx, cfg, s, err)
 	return err
 }
 

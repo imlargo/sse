@@ -87,6 +87,22 @@
 // Whichever is chosen, a slow subscriber never affects the publisher or any
 // other subscriber.
 //
+// # Locking discipline
+//
+// There are five mutexes in this package and they are never nested. No lock is
+// held while acquiring another, and none is held while blocking on a channel or
+// while calling out to anything an application supplied — a Transport, a Codec,
+// a metrics hook.
+//
+// That is not a coincidence to be preserved by care; it is the reason a lock
+// ordering deadlock cannot happen here, because there is no ordering to get
+// wrong. A change that nests two of them reintroduces the whole class of bug,
+// so it is worth resisting: wherever the temptation appears, copying the value
+// out and releasing the lock first has always been enough.
+//
+// The one call made under a lock is waking readers, which closes a channel and
+// makes a new one. Neither blocks and neither re-enters this package.
+//
 // # Beyond the core
 //
 // This module depends only on the standard library. Anything that needs a
