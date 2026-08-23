@@ -107,13 +107,38 @@ func TestChurningSessionsRetainNothing(t *testing.T) {
 				defer wg.Done()
 				c := ssetest.NewConn()
 				defer c.Close()
+				// A spread of client behaviour, because the paths that hold
+				// state are the ones a healthy client never reaches: stalling
+				// arms the write deadline, throttling fills the queue and makes
+				// it discard, and a grant deadline arms a timer.
+				switch i % 4 {
+				case 0:
+					c.Throttle(time.Millisecond)
+				case 1:
+					go func() { time.Sleep(3 * time.Millisecond); c.Stall() }()
+				}
+				var grant sse.Grant
+				if i%2 == 0 {
+					grant.Deadline = time.Now().Add(8 * time.Millisecond)
+				}
+
 				ctx, cancel := context.WithTimeout(context.Background(), 15*time.Millisecond)
 				defer cancel()
-				_ = sse.Serve(ctx, c, httptest.NewRequest("GET", "/e", nil),
+				_ = sse.ServeGrant(ctx, c, httptest.NewRequest("GET", "/e", nil),
 					func(sctx context.Context, s *sse.Session) error {
+						if i%8 == 0 {
+							// The side channel keeps a reference to the session
+							// from outside it, so it is worth churning too.
+							go func() {
+								time.Sleep(2 * time.Millisecond)
+								_ = s.Resubscribe(sse.MustFilter(fmt.Sprintf("u.%d.>", i%16)))
+							}()
+						}
 						return b.Subscribe(sctx, s, sse.MustFilter(fmt.Sprintf("u.%d.>", i)))
-					}, sse.WithLog("events", log), sse.WithLifecycle(lc),
-					sse.WithKeepAlive(5*time.Millisecond))
+					}, grant,
+					sse.WithLog("events", log), sse.WithLifecycle(lc),
+					sse.WithKeepAlive(4*time.Millisecond),
+					sse.WithWriteTimeout(20*time.Millisecond))
 			}()
 			if i%50 == 0 {
 				_, _ = b.Publish(context.Background(), sse.MustTopic("u.1.x"), sse.Text("x"))
