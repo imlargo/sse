@@ -273,19 +273,36 @@ func TestWriteFailureEndsSession(t *testing.T) {
 }
 
 // Send reports acceptance, never delivery (RNF-13). Once the writer is gone,
-// Send must say so rather than silently succeed.
+// Send must say so rather than silently succeed — and it must say what actually
+// happened, not a generic "closed".
+//
+// The wait matters. Send does not fail merely because the queue is full: the
+// default policy discards and returns nil, by design. It fails only once the
+// writer has ended the session, so the test waits for that instead of assuming
+// the writer will be scheduled within some number of calls. Asserting a
+// scheduling outcome is how a test passes on eight cores and fails on two.
 func TestSendAfterWriterFailureReports(t *testing.T) {
 	c := ssetest.NewConn()
 	_ = serveOn(t, c, func(ctx context.Context, s *sse.Session) error {
-		c.Fail(errors.New("gone"))
-		var last error
-		for range 200 {
-			if last = s.Send(ctx, sse.Text("x")); last != nil {
-				break
-			}
+		c.Fail(errors.New("connection reset by peer"))
+
+		// Nudge the writer into discovering it, then wait for it to be done.
+		_ = s.Send(ctx, sse.Text("x"))
+		select {
+		case <-s.Done():
+		case <-time.After(5 * time.Second):
+			t.Error("the writer never noticed the connection had failed")
+			return nil
 		}
-		if last == nil {
-			t.Error("Send kept succeeding after the connection failed")
+
+		err := s.Send(ctx, sse.Text("x"))
+		if err == nil {
+			t.Fatal("Send succeeded after the session had ended")
+		}
+		// RF-A9: the caller wants to know the client is gone, not merely that
+		// something is closed.
+		if !errors.Is(err, sse.ErrClientGone) {
+			t.Errorf("Send reported %v, want it to name the client being gone", err)
 		}
 		return nil
 	})
