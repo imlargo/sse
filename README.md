@@ -67,7 +67,9 @@ machinery than you need; reach for the standard library or something smaller.
 go get github.com/imlargo/sse
 ```
 
-Go 1.25 or later. The core imports nothing outside the standard library.
+Go 1.25 or later — the oldest release this needs, for `testing/synctest`.
+Tested on 1.25 through 1.27. The core imports nothing outside the standard
+library.
 
 ## Concepts
 

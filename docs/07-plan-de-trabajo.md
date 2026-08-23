@@ -11,7 +11,7 @@ relativo** (S / M / L) y **dependencias**, que es lo que sirve para planificar.
 pruebas. La suite corre siempre con `-race`, con detección de fugas de goroutines
 en **todas** las pruebas (RP-4, RP-5) y con reloj virtual (`testing/synctest`)
 para todo lo que dependa del tiempo (RP-3). Go mínimo: **1.25** (`synctest`
-estable); desarrollo sobre 1.26.
+estable); desarrollo sobre 1.27.
 
 ---
 

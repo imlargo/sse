@@ -14,7 +14,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        go: ['1.25', '1.26']
+        # 1.25 is the declared minimum, because that is the oldest release this
+        # actually needs (testing/synctest). It is tested on every release from
+        # there so the claim stays true rather than being assumed.
+        go: ['1.25', '1.26', '1.27']
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -45,7 +48,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.26'
+          go-version: '1.27'
       - name: Sustained load
         run: |
           ulimit -n 65535
@@ -57,7 +60,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.26'
+          go-version: '1.27'
       # RP-2: arbitrary input must never panic or allocate without bound.
       - name: Fuzz the parser
         run: go test -run '^$' -fuzz FuzzDecoder -fuzztime 60s ./wire
@@ -79,7 +82,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.26'
+          go-version: '1.27'
       - name: Stress
         run: go test -race -count=1 -run TestStress -timeout 15m .
 
@@ -89,7 +92,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.26'
+          go-version: '1.27'
       # RNF-3: the allocation budget is asserted by a test, so a regression
       # fails CI instead of being noticed later.
       # Bounded on purpose. Go sizes the iteration count from an early, fast
@@ -115,7 +118,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.26'
+          go-version: '1.27'
       - name: Redis Streams log
         working-directory: logs/redislog
         env:
@@ -130,7 +133,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.26'
+          go-version: '1.27'
       - name: Gin and Echo compatibility
         working-directory: compat
         run: go test -race -count=1 ./...
@@ -144,7 +147,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.26'
+          go-version: '1.27'
       - name: Fiber adapter
         working-directory: adapters/fibersse
         run: go test -race -count=1 ./...
@@ -158,7 +161,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.26'
+          go-version: '1.27'
       - name: Are the submodules publishable?
         run: make release-check || echo "::notice::submodules still point at local paths; see CONTRIBUTING.md#releasing"
 
@@ -174,7 +177,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.26'
+          go-version: '1.27'
       - uses: dominikh/staticcheck-action@v1
         with:
           version: latest
