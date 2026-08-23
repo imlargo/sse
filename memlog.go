@@ -4,6 +4,7 @@ import (
 	"context"
 	crand "crypto/rand"
 	"encoding/binary"
+	"fmt"
 	"slices"
 	"sync"
 	"time"
@@ -27,6 +28,10 @@ type MemoryLog struct {
 	epoch     Epoch
 	retention Retention
 	resumable bool
+
+	// externalOffsets means positions come from the source this log mirrors,
+	// not from a counter here.
+	externalOffsets bool
 
 	// entries holds the retained window. The live entries are entries[head:];
 	// evicting advances head rather than moving anything, so an append stays
@@ -52,7 +57,35 @@ type MemoryLog struct {
 // small window its live readers need, [LogInfo.Resumable] is false, and a
 // client presenting a cursor is told plainly that history is not available. Not
 // promising is better than half-promising (RF-C1).
-func NewMemoryLog(r Retention) *MemoryLog {
+// A MemoryOption adjusts a [MemoryLog] at construction.
+type MemoryOption func(*MemoryLog)
+
+// WithEpoch fixes the log's generation instead of generating one.
+//
+// It exists for adapters that mirror an external log locally: the generation
+// belongs to the shared source, and every node has to report the same one or a
+// client reconnecting to a different replica would be told its cursor came from
+// an earlier generation.
+func WithEpoch(e Epoch) MemoryOption {
+	return func(l *MemoryLog) {
+		if e != 0 {
+			l.epoch = e
+		}
+	}
+}
+
+// WithExternalOffsets makes the log take positions from its caller rather than
+// assigning them.
+//
+// An adapter mirroring an external log must keep that log's own offsets: they
+// are what a resumption cursor carries, and they have to mean the same thing on
+// every node. [MemoryLog.Append] then refuses, and [MemoryLog.AppendAt] is used
+// instead.
+func WithExternalOffsets() MemoryOption {
+	return func(l *MemoryLog) { l.externalOffsets = true }
+}
+
+func NewMemoryLog(r Retention, opts ...MemoryOption) *MemoryLog {
 	resumable := !r.IsZero()
 	if !resumable {
 		r = defaultWindow
@@ -67,13 +100,17 @@ func NewMemoryLog(r Retention) *MemoryLog {
 		presize = presizeCap
 	}
 
-	return &MemoryLog{
+	l := &MemoryLog{
 		epoch:     newEpoch(),
 		retention: r,
 		resumable: resumable,
 		wake:      newWakeSet(),
 		entries:   make([]Entry, 0, presize),
 	}
+	for _, opt := range opts {
+		opt(l)
+	}
+	return l
 }
 
 // newEpoch generates a fresh generation identifier.
@@ -94,6 +131,28 @@ func newEpoch() Epoch {
 }
 
 func (l *MemoryLog) Append(ctx context.Context, f Frame) (Offset, error) {
+	if l.externalOffsets {
+		return 0, fmt.Errorf("sse: this log takes positions from its source; use AppendAt")
+	}
+	return l.appendAt(ctx, 0, f)
+}
+
+// AppendAt stores a frame at a position chosen by the caller.
+//
+// It is for adapters mirroring an external log, where the position is that
+// log's and must be preserved: a resumption cursor carries it, and it has to
+// resolve to the same event on every node. Offsets must still increase
+// strictly; a repeat or a step backwards is refused rather than accepted into a
+// window whose ordering everything else relies on.
+func (l *MemoryLog) AppendAt(ctx context.Context, at Offset, f Frame) error {
+	if at == 0 {
+		return fmt.Errorf("sse: AppendAt: offset must not be zero, which means \"before everything\"")
+	}
+	_, err := l.appendAt(ctx, at, f)
+	return err
+}
+
+func (l *MemoryLog) appendAt(ctx context.Context, at Offset, f Frame) (Offset, error) {
 	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
@@ -107,8 +166,17 @@ func (l *MemoryLog) Append(ctx context.Context, f Frame) (Offset, error) {
 		return 0, ErrLogClosed
 	}
 
-	l.next++
-	off := l.next
+	off := at
+	if off == 0 {
+		l.next++
+		off = l.next
+	} else {
+		if off <= l.next {
+			l.mu.Unlock()
+			return 0, fmt.Errorf("sse: AppendAt: offset %d is not past the last one written (%d)", off, l.next)
+		}
+		l.next = off
+	}
 
 	l.entries = append(l.entries, Entry{Offset: off, Frame: f})
 	l.bytes += f.Size()

@@ -196,6 +196,15 @@ exactly where it stopped, because its cursor names a log and an offset rather
 than anything about the node. Verified with two processes: disconnected at step
 9 on one node, resumed at step 10 on the other. No sticky sessions.
 
+**A node holds one Redis connection, whatever the audience.** It tails the
+stream once in the background and every local subscriber reads from an
+in-process window; a subscriber older than that window is caught up with
+`XRANGE`, which does not block. Measured: 400 subscribers, one blocked Redis
+client, one event reaching all of them in 6ms.
+
+Redis moves the *history* off the process, not the *connections*. If the goal is
+less memory per node, the lever is replicas — see Performance.
+
 ### Changing a subscription without reconnecting
 
 `EventSource` cannot send anything to the server, so this needs a side channel —

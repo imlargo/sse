@@ -10,6 +10,25 @@
 // parts where a library's quality lives, and each one does it differently and
 // worse. Here an integration is an append, a follow and a describe.
 //
+// # One reader per node, not per subscriber
+//
+// A node tails the stream once, in a single background goroutine, and mirrors
+// what it reads into an in-process window that every local subscriber reads
+// from. Subscribers never touch Redis.
+//
+// That is not an optimisation, it is the difference between working and not. A
+// blocking XREAD occupies a connection for as long as it blocks, so a reader
+// per subscriber means a Redis connection per subscriber: past the client's
+// pool size — eighty by default — every further subscriber waits for a
+// connection that never frees, and the node stops delivering. Measured on a
+// laptop, 250 subscribers saturated the pool with 80 blocked connections and
+// nothing got through.
+//
+// A subscriber whose position predates the local window is caught up straight
+// from Redis with XRANGE, which does not block and returns its connection
+// immediately, and then joins the local tail. So a node holds exactly one
+// long-lived Redis connection however many clients it serves.
+//
 // # Mapping onto Redis Streams
 //
 // A Redis stream entry id is "<milliseconds>-<sequence>". Offsets pack that
@@ -32,6 +51,7 @@ import (
 	"log/slog"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -47,6 +67,25 @@ type Log struct {
 	policy sse.Retention
 	block  time.Duration
 	logger *slog.Logger
+
+	// local mirrors the stream for this node. Every subscriber reads from it;
+	// only the tailer below reads from Redis.
+	local *sse.MemoryLog
+
+	// window is how much of the stream this node keeps locally. It bounds
+	// memory per node rather than per subscriber, and a subscriber older than
+	// it is caught up from Redis instead.
+	window sse.Retention
+
+	// epoch is read again periodically, because a stream can be wiped or
+	// replaced underneath a node that is still running. It is atomic so the
+	// tailer can update it while subscribers read it.
+	currentEpoch  atomic.Uint64
+	epochInterval time.Duration
+
+	stop     context.CancelFunc
+	tailDone chan struct{}
+	closeOne sync.Once
 
 	// trimFailures counts consecutive failures to apply the age limit, so the
 	// log complains once and then periodically rather than on every publish.
@@ -73,10 +112,32 @@ func (l *Log) reportTrimFailure(ctx context.Context, err error) {
 // Option configures a Log.
 type Option func(*Log)
 
-// WithBlockTimeout sets how long a follow waits on Redis before looping. It
-// bounds how quickly a reader notices its context was cancelled.
+// WithBlockTimeout sets how long the tailer waits on Redis before looping. It
+// bounds how quickly the log notices it has been closed.
 func WithBlockTimeout(d time.Duration) Option {
 	return func(l *Log) { l.block = d }
+}
+
+// WithEpochCheckInterval sets how often the node re-reads the stream's
+// generation.
+//
+// A stream can be wiped, replaced, or failed over to an empty replica while a
+// node is running, and the node would otherwise keep reporting the generation
+// it read at startup — accepting cursors that now point at unrelated events.
+// Checking is one small read, so the default is frequent enough to bound the
+// window and cheap enough to ignore.
+func WithEpochCheckInterval(d time.Duration) Option {
+	return func(l *Log) { l.epochInterval = d }
+}
+
+// WithLocalWindow sets how much of the stream this node keeps in memory.
+//
+// It is a per-node cost, not a per-subscriber one: every subscriber reads from
+// the same window. Bigger means fewer catch-up round trips to Redis when a
+// client reconnects; smaller means less memory. The default holds a few
+// thousand events or a minute, whichever comes first.
+func WithLocalWindow(r sse.Retention) Option {
+	return func(l *Log) { l.window = r }
 }
 
 // New returns a Log over the Redis stream at key.
@@ -84,19 +145,151 @@ func WithBlockTimeout(d time.Duration) Option {
 // The retention is applied by Redis itself on append, so it holds across every
 // node without coordination.
 func New(ctx context.Context, rdb redis.UniversalClient, key string, r sse.Retention, opts ...Option) (*Log, error) {
-	l := &Log{rdb: rdb, key: key, policy: r, block: 5 * time.Second, logger: slog.Default()}
+	l := &Log{
+		rdb:           rdb,
+		key:           key,
+		policy:        r,
+		block:         5 * time.Second,
+		logger:        slog.Default(),
+		window:        sse.Retention{Events: 4096, For: time.Minute},
+		epochInterval: 30 * time.Second,
+		tailDone:      make(chan struct{}),
+	}
 	for _, opt := range opts {
 		opt(l)
 	}
 	if l.logger == nil {
 		l.logger = slog.Default()
 	}
+
 	epoch, err := l.loadEpoch(ctx)
 	if err != nil {
 		return nil, err
 	}
 	l.epoch = epoch
+	l.currentEpoch.Store(uint64(epoch))
+
+	// The local mirror carries Redis's own offsets and generation, so a cursor
+	// minted here resolves on any other node reading the same stream.
+	l.local = sse.NewMemoryLog(l.window,
+		sse.WithEpoch(epoch), sse.WithExternalOffsets())
+
+	// Start where the stream is now. Replaying the whole history into every
+	// node at startup would cost what the history costs, per node, for nothing:
+	// a subscriber that wants older events is caught up from Redis directly.
+	info, err := l.Info(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	tailCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+	l.stop = cancel
+	go l.tail(tailCtx, info.Newest)
+
 	return l, nil
+}
+
+// tail is the node's single reader. It is the only thing here that holds a
+// Redis connection for any length of time.
+func (l *Log) tail(ctx context.Context, from sse.Offset) {
+	defer close(l.tailDone)
+
+	pos := from
+	var backoff time.Duration
+	lastEpochCheck := time.Now()
+
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+
+		if l.epochInterval > 0 && time.Since(lastEpochCheck) >= l.epochInterval {
+			lastEpochCheck = time.Now()
+			l.recheckEpoch(ctx)
+		}
+
+		res, err := l.rdb.XRead(ctx, &redis.XReadArgs{
+			Streams: []string{l.key, formatID(pos)},
+			Block:   l.block,
+			Count:   512,
+		}).Result()
+
+		switch {
+		case err == nil, err == redis.Nil:
+			backoff = 0
+		case ctx.Err() != nil:
+			return
+		default:
+			// Redis is unreachable, restarting, failing over. Retry rather than
+			// give up: the stream is still there and the subscribers on this
+			// node are still connected. What they must not get is silence
+			// pretending to be an empty stream, so anything missed while this
+			// is down surfaces as a declared gap once reading resumes.
+			backoff = nextBackoff(backoff)
+			lastEpochCheck = time.Time{} // a failure is a likely moment for a wipe
+			l.logger.WarnContext(ctx, "redislog: cannot read the stream, retrying",
+				"stream", l.key, "retryIn", backoff, "error", err)
+			select {
+			case <-time.After(backoff):
+			case <-ctx.Done():
+				return
+			}
+			continue
+		}
+
+		for _, stream := range res {
+			for _, msg := range stream.Messages {
+				off, perr := parseID(msg.ID)
+				if perr != nil {
+					continue
+				}
+				pos = off
+				if aerr := l.local.AppendAt(ctx, off, frameOf(msg)); aerr != nil {
+					if ctx.Err() != nil {
+						return
+					}
+					l.logger.WarnContext(ctx, "redislog: dropping an entry the local window refused",
+						"stream", l.key, "offset", off, "error", aerr)
+				}
+			}
+		}
+	}
+}
+
+// recheckEpoch re-reads the stream's generation and adopts it if it changed.
+//
+// A change means the stream this node has been mirroring is not the one in
+// Redis any more, so every position a client holds from before is meaningless.
+// Reporting the new generation is what turns that into a declared gap instead
+// of a client being handed unrelated events.
+func (l *Log) recheckEpoch(ctx context.Context) {
+	epoch, err := l.loadEpoch(ctx)
+	if err != nil {
+		return // unreachable Redis is the tailer's problem, not this one's
+	}
+	previous := sse.Epoch(l.currentEpoch.Swap(uint64(epoch)))
+	if previous == epoch {
+		return
+	}
+	l.logger.WarnContext(ctx,
+		"redislog: the stream's generation changed; positions held by clients no longer resolve",
+		"stream", l.key, "was", previous, "now", epoch)
+}
+
+// nextBackoff grows the wait between failed reads, bounded so recovery is still
+// prompt once Redis comes back.
+func nextBackoff(current time.Duration) time.Duration {
+	const (
+		first = 50 * time.Millisecond
+		limit = 2 * time.Second
+	)
+	if current == 0 {
+		return first
+	}
+	if next := current * 2; next < limit {
+		return next
+	}
+	return limit
 }
 
 // loadEpoch reads the stream's generation, creating it once if absent.
@@ -171,22 +364,58 @@ func (l *Log) Append(ctx context.Context, f sse.Frame) (sse.Offset, error) {
 // the cost of waking goroutines that will discard the event, and a reader here
 // is parked on a network call rather than on a Go channel, so there is nothing
 // to save.
-func (l *Log) Read(ctx context.Context, after sse.Offset, _ sse.ReadOptions) (sse.Reader, error) {
+// Read returns a reader for one subscriber.
+//
+// It costs no Redis connection in the common case: the node's local window is
+// already being filled by the tailer, so a subscriber reading recent events
+// reads out of memory. Only a position older than that window needs Redis, and
+// then through XRANGE, which does not block.
+func (l *Log) Read(ctx context.Context, after sse.Offset, opts sse.ReadOptions) (sse.Reader, error) {
 	info, err := l.Info(ctx)
 	if err != nil {
 		return nil, err
 	}
-	r := &reader{log: l, pos: after}
+
+	var gap *sse.Gap
 	if after > 0 && info.Oldest > 0 && after < info.Oldest-1 {
-		// The client's position is behind everything Redis still holds.
-		r.gap = &sse.Gap{Reason: sse.GapRetention, From: after, Through: info.Oldest - 1}
+		// Behind everything Redis still holds. Declared, and resumed from the
+		// oldest that does exist rather than quietly starting later.
+		gap = &sse.Gap{Reason: sse.GapRetention, From: after, Through: info.Oldest - 1}
+		after = info.Oldest - 1
+	}
+
+	local, err := l.local.Read(ctx, after, opts)
+	if err != nil {
+		return nil, err
+	}
+
+	// Where the local window currently begins. Anything the subscriber wants
+	// before that has to come from Redis first.
+	localInfo, err := l.local.Info(ctx)
+	if err != nil {
+		local.Close()
+		return nil, err
+	}
+
+	r := &reader{log: l, local: local, gap: gap}
+	if localInfo.Oldest == 0 || after+1 < localInfo.Oldest {
+		// The local reader will begin at the window's first entry, so catch-up
+		// covers exactly what precedes it. Opening the local reader first is
+		// what makes the join exact: nothing published in between is missed,
+		// and nothing is delivered twice.
+		r.catchUpFrom = after
+		r.catchUpTo = localInfo.Oldest
+		if localInfo.Oldest == 0 {
+			r.catchUpTo = info.Newest + 1
+		}
+		r.catchingUp = true
 	}
 	return r, nil
 }
 
 func (l *Log) Info(ctx context.Context) (sse.LogInfo, error) {
 	info := sse.LogInfo{
-		Epoch:     l.epoch,
+		Epoch:     sse.Epoch(l.currentEpoch.Load()),
 		Resumable: !l.policy.IsZero(),
 		Retention: l.policy,
 	}
@@ -221,66 +450,83 @@ func (l *Log) Info(ctx context.Context) (sse.LogInfo, error) {
 	return info, nil
 }
 
-// reader follows the stream from a position. It holds only that position, the
-// same as the in-memory log: an extra subscriber is an offset, not a queue.
+// reader serves one subscriber: first whatever precedes this node's local
+// window, straight from Redis, then the local window itself.
+//
+// There is no live handover to race. The local reader is opened before catch-up
+// begins and holds its position throughout, so the two ranges meet exactly:
+// catch-up ends where the local window starts.
 type reader struct {
-	log    *Log
-	pos    sse.Offset
-	gap    *sse.Gap
-	buf    []sse.Entry
-	closed bool
+	log   *Log
+	local sse.Reader
+	gap   *sse.Gap
+
+	catchingUp  bool
+	catchUpFrom sse.Offset
+	catchUpTo   sse.Offset
+	pending     []sse.Entry
+
+	closeOnce sync.Once
 }
 
-func (r *reader) Gap() *sse.Gap { return r.gap }
+func (r *reader) Gap() *sse.Gap {
+	if r.gap != nil {
+		return r.gap
+	}
+	return r.local.Gap()
+}
 
 func (r *reader) Close() error {
-	r.closed = true
+	r.closeOnce.Do(func() { r.local.Close() })
 	return nil
 }
 
 func (r *reader) Next(ctx context.Context) (sse.Entry, error) {
-	for {
-		if len(r.buf) > 0 {
-			e := r.buf[0]
-			r.buf = r.buf[1:]
-			r.pos = e.Offset
+	for r.catchingUp {
+		if len(r.pending) > 0 {
+			e := r.pending[0]
+			r.pending = r.pending[1:]
+			r.catchUpFrom = e.Offset
 			return e, nil
 		}
-		if r.closed {
-			return sse.Entry{}, sse.ErrLogClosed
-		}
-		if err := ctx.Err(); err != nil {
+		if err := r.fetchCatchUp(ctx); err != nil {
 			return sse.Entry{}, err
 		}
-
-		// XREAD serves replay and live delivery with the same call: it returns
-		// whatever is already past the position, and blocks when there is
-		// nothing. There is no separate catch-up mode to hand over from, which
-		// is why the handover cannot race.
-		res, err := r.log.rdb.XRead(ctx, &redis.XReadArgs{
-			Streams: []string{r.log.key, formatID(r.pos)},
-			Block:   r.log.block,
-			Count:   256,
-		}).Result()
-		if err != nil {
-			if err == redis.Nil {
-				continue // block timeout, nothing new
-			}
-			if ctx.Err() != nil {
-				return sse.Entry{}, ctx.Err()
-			}
-			return sse.Entry{}, fmt.Errorf("redislog: read: %w", err)
-		}
-		for _, stream := range res {
-			for _, msg := range stream.Messages {
-				off, err := parseID(msg.ID)
-				if err != nil {
-					continue
-				}
-				r.buf = append(r.buf, sse.Entry{Offset: off, Frame: frameOf(msg)})
-			}
-		}
 	}
+	return r.local.Next(ctx)
+}
+
+// fetchCatchUp pulls the next batch of history from Redis. XRANGE does not
+// block, so the connection goes straight back to the pool.
+func (r *reader) fetchCatchUp(ctx context.Context) error {
+	const batch = 512
+
+	msgs, err := r.log.rdb.XRangeN(ctx,
+		r.log.key,
+		"("+formatID(r.catchUpFrom),
+		formatID(r.catchUpTo-1),
+		batch,
+	).Result()
+	if err != nil && err != redis.Nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return fmt.Errorf("redislog: catching up: %w", err)
+	}
+
+	if len(msgs) == 0 {
+		// Nothing left before the window; join the local tail.
+		r.catchingUp = false
+		return nil
+	}
+	for _, msg := range msgs {
+		off, perr := parseID(msg.ID)
+		if perr != nil {
+			continue
+		}
+		r.pending = append(r.pending, sse.Entry{Offset: off, Frame: frameOf(msg)})
+	}
+	return nil
 }
 
 func frameOf(msg redis.XMessage) sse.Frame {
@@ -335,4 +581,18 @@ func idMillis(id string) uint64 {
 	msPart, _, _ := strings.Cut(id, "-")
 	ms, _ := strconv.ParseUint(msPart, 10, 64)
 	return ms
+}
+
+// Close stops the node's tailer and releases the local window. It does not
+// touch the stream in Redis, which belongs to the deployment rather than to any
+// one node.
+func (l *Log) Close() error {
+	l.closeOne.Do(func() {
+		if l.stop != nil {
+			l.stop()
+		}
+		<-l.tailDone
+		l.local.Close()
+	})
+	return nil
 }
