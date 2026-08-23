@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/imlargo/sse"
+	"github.com/imlargo/sse/internal/leak"
 	"github.com/imlargo/sse/logs/redislog"
 	"github.com/imlargo/sse/ssetest"
 	"github.com/imlargo/sse/wire"
@@ -56,6 +57,7 @@ func TestAppendAndRead(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer l.Close()
 
 	for i := range 5 {
 		if _, err := l.Append(ctx, sse.Frame{
@@ -105,6 +107,7 @@ func TestOffsetsPreserveOrder(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer l.Close()
 
 	var prev sse.Offset
 	for range 200 {
@@ -131,6 +134,7 @@ func TestReaderFollowsTheTail(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer l.Close()
 
 	r, err := l.Read(ctx, 0, sse.ReadOptions{})
 	if err != nil {
@@ -169,6 +173,7 @@ func TestGapAfterTrimming(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer l.Close()
 	first, err := l.Append(ctx, sse.Frame{Body: []byte("data: first\n\n")})
 	if err != nil {
 		t.Fatal(err)
@@ -210,11 +215,13 @@ func TestEpochIsSharedAcrossNodes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	b, err := redislog.New(ctx, goredis.NewClient(&goredis.Options{Addr: addr()}), key,
+	defer a.Close()
+	b, err := redislog.New(ctx, client(t), key,
 		sse.Retention{Events: 100})
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer b.Close()
 
 	ia, _ := a.Info(ctx)
 	ib, _ := b.Info(ctx)
@@ -240,16 +247,18 @@ func TestResumeAcrossNodes(t *testing.T) {
 	key := freshKey(t, c)
 
 	// Two nodes: separate clients, separate logs, separate brokers, one stream.
-	nodeA, err := redislog.New(ctx, goredis.NewClient(&goredis.Options{Addr: addr()}), key,
+	nodeA, err := redislog.New(ctx, client(t), key,
 		sse.Retention{Events: 10_000}, redislog.WithBlockTimeout(200*time.Millisecond))
 	if err != nil {
 		t.Fatal(err)
 	}
-	nodeB, err := redislog.New(ctx, goredis.NewClient(&goredis.Options{Addr: addr()}), key,
+	defer nodeA.Close()
+	nodeB, err := redislog.New(ctx, client(t), key,
 		sse.Retention{Events: 10_000}, redislog.WithBlockTimeout(200*time.Millisecond))
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer nodeB.Close()
 
 	brokerA := sse.NewBroker("events", nodeA)
 	brokerB := sse.NewBroker("events", nodeB)
@@ -308,6 +317,7 @@ func TestTopicFilteringOverRedis(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer l.Close()
 	b := sse.NewBroker("events", l)
 
 	for _, tp := range []string{"tenant.acme.tickets", "tenant.globex.tickets", "tenant.acme.builds"} {
@@ -390,4 +400,17 @@ func lastID(t *testing.T, c *ssetest.Conn) string {
 		}
 	}
 	return d.LastEventID()
+}
+
+// Leak detection: a log that is not closed leaves its tailer goroutine — and
+// its blocking XREAD — alive forever. That is the adapter's most costly
+// possible bug, so the tests that exercise it have to be held to it too.
+//
+// go-redis keeps its own background goroutines per client; those frames are
+// named individually rather than matched by a broad pattern, because a check
+// that swallows our leaks is worse than no check.
+func TestMain(m *testing.M) {
+	leak.MainIgnoring(m.Run,
+		"redis/v9/internal/pool.(*ConnPool).reaper",
+	)
 }

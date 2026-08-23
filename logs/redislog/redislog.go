@@ -112,8 +112,14 @@ func (l *Log) reportTrimFailure(ctx context.Context, err error) {
 // Option configures a Log.
 type Option func(*Log)
 
-// WithBlockTimeout sets how long the tailer waits on Redis before looping. It
-// bounds how quickly the log notices it has been closed.
+// WithBlockTimeout sets how long the tailer parks on Redis before looping.
+//
+// It does not affect delivery latency: a blocking XREAD returns the moment an
+// entry arrives, whatever the window. All a longer window saves is an idle
+// round trip per window per node, which is nothing — and it costs shutdown
+// latency, because go-redis applies a context's deadline to the socket but
+// does not watch it for cancellation, so a read already in flight runs to
+// completion. [Log.Close] therefore waits out at most one window.
 func WithBlockTimeout(d time.Duration) Option {
 	return func(l *Log) { l.block = d }
 }
@@ -149,7 +155,7 @@ func New(ctx context.Context, rdb redis.UniversalClient, key string, r sse.Reten
 		rdb:           rdb,
 		key:           key,
 		policy:        r,
-		block:         5 * time.Second,
+		block:         time.Second,
 		logger:        slog.Default(),
 		window:        sse.Retention{Events: 4096, For: time.Minute},
 		epochInterval: 30 * time.Second,
@@ -586,6 +592,11 @@ func idMillis(id string) uint64 {
 // Close stops the node's tailer and releases the local window. It does not
 // touch the stream in Redis, which belongs to the deployment rather than to any
 // one node.
+//
+// It waits for the tailer to stop, so that a closed log leaves no goroutine and
+// no Redis connection behind. That wait is bounded by the block timeout — see
+// [WithBlockTimeout] for why it cannot be cut short. Close is idempotent and
+// safe to call concurrently.
 func (l *Log) Close() error {
 	l.closeOne.Do(func() {
 		if l.stop != nil {
